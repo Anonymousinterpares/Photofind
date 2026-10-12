@@ -52,6 +52,17 @@ class PhotoStore(context: Context) : SQLiteOpenHelper(context, "photofind.db", n
         writableDatabase.insertWithOnConflict("photos", null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
+    fun putAll(rows: List<Pair<PhotoFile, FloatArray>>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            rows.forEach { (photo, embedding) -> put(photo, embedding) }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun delete(keys: Collection<String>) {
         val db = writableDatabase
         db.beginTransaction()

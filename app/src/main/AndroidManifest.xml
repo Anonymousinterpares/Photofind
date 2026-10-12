@@ -43,6 +43,17 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <receiver
+            android:name=".sync.PcSyncReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="com.photofind.EXPORT" />
+                <action android:name="com.photofind.IMPORT" />
+                <action android:name="com.photofind.RESUME" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"

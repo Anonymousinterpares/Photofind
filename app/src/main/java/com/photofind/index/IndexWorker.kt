@@ -15,6 +15,8 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.photofind.photoFind
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 
 /**
@@ -47,32 +49,66 @@ class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             .sortedByDescending { it.dateTaken }
         var done = 0
         var failed = 0
-        for (photo in todo) {
-            if (isStopped) break
-            val vector = try {
-                val bitmap = withContext(Dispatchers.IO) { decodeForEmbedding(applicationContext, photo.uri) }
-                try {
-                    app.embedder.embedImage(bitmap)
-                } finally {
-                    bitmap.recycle()
+        var waitNanos = 0L
+        var embedNanos = 0L
+        coroutineScope {
+            fun decodeAsync(photo: PhotoFile) = async(Dispatchers.IO) {
+                runCatching { decodeForEmbedding(applicationContext, photo.uri) }
+            }
+
+            var next = todo.firstOrNull()?.let(::decodeAsync)
+            for ((index, photo) in todo.withIndex()) {
+                if (isStopped) {
+                    next?.cancel()
+                    break
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Skipping ${photo.key}", e)
-                failed++
-                null
+                val waitStart = System.nanoTime()
+                val decoded = checkNotNull(next).await()
+                next = todo.getOrNull(index + 1)?.let(::decodeAsync)
+                val embedStart = System.nanoTime()
+                waitNanos += embedStart - waitStart
+                val vector = try {
+                    val bitmap = decoded.getOrThrow()
+                    try {
+                        app.embedder.embedImage(bitmap)
+                    } finally {
+                        bitmap.recycle()
+                        embedNanos += System.nanoTime() - embedStart
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Skipping ${photo.key}", e)
+                    failed++
+                    null
+                }
+                record(photo, vector, ++done, todo.size, waitNanos, embedNanos)
             }
-            withContext(Dispatchers.IO) { app.store.put(photo, vector) }
-            done++
-            if (done % PROGRESS_EVERY == 0 || done == todo.size) {
-                setProgress(workDataOf(KEY_DONE to done, KEY_TOTAL to todo.size))
-                setForeground(foregroundInfo(done, todo.size))
-            }
-            if (done % REFRESH_SEARCH_EVERY == 0) app.search.invalidate()
         }
         app.search.invalidate()
         return Result.success(
             workDataOf(KEY_DONE to done, KEY_TOTAL to todo.size, KEY_FAILED to failed),
         )
+    }
+
+    private suspend fun record(
+        photo: PhotoFile,
+        vector: FloatArray?,
+        done: Int,
+        total: Int,
+        waitNanos: Long,
+        embedNanos: Long,
+    ) {
+        val app = applicationContext.photoFind
+        withContext(Dispatchers.IO) { app.store.put(photo, vector) }
+        if (done % PROGRESS_EVERY == 0 || done == total) {
+            setProgress(workDataOf(KEY_DONE to done, KEY_TOTAL to total))
+            setForeground(foregroundInfo(done, total))
+            Log.i(
+                TAG,
+                "$done/$total: waiting for decode ${waitNanos / 1_000_000 / done} ms, " +
+                    "embed ${embedNanos / 1_000_000 / done} ms per photo",
+            )
+        }
+        if (done % REFRESH_SEARCH_EVERY == 0) app.search.invalidate()
     }
 
     private fun foregroundInfo(done: Int, total: Int): ForegroundInfo {

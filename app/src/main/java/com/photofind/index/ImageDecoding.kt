@@ -12,7 +12,7 @@ import kotlin.math.roundToInt
  * Decodes a photo upright (EXIF rotation applied) and downscaled; the embedder resizes
  * internally, so full resolution only costs memory and time.
  */
-fun decodeForEmbedding(context: Context, uri: Uri, maxSide: Int = 1024): Bitmap {
+fun decodeForEmbedding(context: Context, uri: Uri, maxSide: Int = 768): Bitmap {
     val source = if (uri.scheme == "file") {
         ImageDecoder.createSource(File(requireNotNull(uri.path)))
     } else {
