@@ -52,8 +52,10 @@ class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         var waitNanos = 0L
         var embedNanos = 0L
         coroutineScope {
+            // Null when the PC has imported this photo since the run started.
             fun decodeAsync(photo: PhotoFile) = async(Dispatchers.IO) {
-                runCatching { decodeForEmbedding(applicationContext, photo.uri) }
+                if (app.store.signature(photo.key) == photo.signature) null
+                else runCatching { decodeForEmbedding(applicationContext, photo.uri) }
             }
 
             var next = todo.firstOrNull()?.let(::decodeAsync)
@@ -65,6 +67,7 @@ class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
                 val waitStart = System.nanoTime()
                 val decoded = checkNotNull(next).await()
                 next = todo.getOrNull(index + 1)?.let(::decodeAsync)
+                if (decoded == null) continue
                 val embedStart = System.nanoTime()
                 waitNanos += embedStart - waitStart
                 val vector = try {

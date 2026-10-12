@@ -41,6 +41,10 @@ class PhotoStore(context: Context) : SQLiteOpenHelper(context, "photofind.db", n
         return out
     }
 
+    fun signature(key: String): String? =
+        readableDatabase.rawQuery("SELECT signature FROM photos WHERE key = ?", arrayOf(key))
+            .use { c -> if (c.moveToFirst()) c.getString(0) else null }
+
     fun put(photo: PhotoFile, embedding: FloatArray?) {
         val values = ContentValues().apply {
             put("key", photo.key)
