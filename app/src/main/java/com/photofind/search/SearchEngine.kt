@@ -5,12 +5,21 @@ import com.photofind.data.PhotoStore
 import com.photofind.embed.Embedder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
-data class IndexedPhoto(val key: String, val uri: Uri, val dateTaken: Long)
+data class IndexedPhoto(val key: String, val uri: Uri, val dateTaken: Long) {
+    val fileName: String get() = File(key).name
+    val folder: String get() = File(key).parentFile?.name.orEmpty()
+}
 
 data class Hit(val photo: IndexedPhoto, val score: Float)
 
-/** All photo embeddings as one row-major matrix: row i belongs to photos[i]. */
+/** Inclusive range of epoch milliseconds. */
+data class DateRange(val startMillis: Long, val endMillis: Long) {
+    operator fun contains(millis: Long): Boolean = millis in startMillis..endMillis
+}
+
+/** All photo embeddings as one row-major matrix: row i belongs to photos[i]. Newest first. */
 class Snapshot(val photos: List<IndexedPhoto>, val dim: Int, val matrix: FloatArray) {
     val size: Int get() = photos.size
 
@@ -32,18 +41,21 @@ class SearchEngine(private val store: PhotoStore, private val embedder: Embedder
         snapshot = null
     }
 
-    suspend fun searchText(query: String, limit: Int = DEFAULT_LIMIT): SearchResult {
+    /** Every searchable photo, newest first. */
+    suspend fun library(): List<IndexedPhoto> = snapshot().photos
+
+    suspend fun searchText(query: String, range: DateRange?, limit: Int = DEFAULT_LIMIT): SearchResult {
         val embedStart = System.nanoTime()
         val vector = embedder.embedText(Embedder.QUERY_PREFIX + query)
         val embedMillis = (System.nanoTime() - embedStart) / 1_000_000
-        return rank(vector, excludeKey = null, limit = limit, embedMillis = embedMillis)
+        return rank(vector, excludeKey = null, range = range, limit = limit, embedMillis = embedMillis)
     }
 
-    suspend fun similarTo(key: String, limit: Int = DEFAULT_LIMIT): SearchResult {
+    suspend fun similarTo(key: String, range: DateRange?, limit: Int = DEFAULT_LIMIT): SearchResult {
         val current = snapshot()
         val index = current.photos.indexOfFirst { it.key == key }
         if (index < 0) return SearchResult(emptyList(), 0, 0)
-        return rank(current.row(index), excludeKey = key, limit = limit, embedMillis = 0)
+        return rank(current.row(index), excludeKey = key, range = range, limit = limit, embedMillis = 0)
     }
 
     private suspend fun snapshot(): Snapshot =
@@ -52,6 +64,7 @@ class SearchEngine(private val store: PhotoStore, private val embedder: Embedder
     private suspend fun rank(
         query: FloatArray,
         excludeKey: String?,
+        range: DateRange?,
         limit: Int,
         embedMillis: Long,
     ): SearchResult {
@@ -66,7 +79,10 @@ class SearchEngine(private val store: PhotoStore, private val embedder: Embedder
                 dot
             }
             val hits = current.photos.indices
-                .filter { current.photos[it].key != excludeKey }
+                .filter { i ->
+                    val photo = current.photos[i]
+                    photo.key != excludeKey && (range == null || photo.dateTaken in range)
+                }
                 .sortedByDescending { scores[it] }
                 .take(limit)
                 .map { Hit(current.photos[it], scores[it]) }
@@ -75,6 +91,6 @@ class SearchEngine(private val store: PhotoStore, private val embedder: Embedder
     }
 
     companion object {
-        const val DEFAULT_LIMIT = 150
+        const val DEFAULT_LIMIT = 200
     }
 }

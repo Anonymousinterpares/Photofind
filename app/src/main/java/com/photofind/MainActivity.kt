@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
                     viewModel = viewModel,
                     onGrantStorage = ::openAllFilesSettings,
                     onOpenPhoto = ::openPhoto,
+                    onSharePhoto = ::sharePhoto,
                 )
             }
         }
@@ -57,18 +58,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openPhoto(uri: Uri) {
-        val shareable = if (uri.scheme == "file") {
-            FileProvider.getUriForFile(this, "$packageName.files", File(requireNotNull(uri.path)))
-        } else {
-            uri
-        }
         val intent = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(shareable, "image/*")
+            .setDataAndType(shareable(uri), "image/*")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         try {
             startActivity(intent)
         } catch (e: ActivityNotFoundException) {
             Toast.makeText(this, "No app can open this photo", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun sharePhoto(uri: Uri) {
+        val intent = Intent(Intent.ACTION_SEND)
+            .setType("image/*")
+            .putExtra(Intent.EXTRA_STREAM, shareable(uri))
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent.createChooser(intent, null))
+    }
+
+    private fun shareable(uri: Uri): Uri = if (uri.scheme == "file") {
+        FileProvider.getUriForFile(this, "$packageName.files", File(requireNotNull(uri.path)))
+    } else {
+        uri
     }
 }
