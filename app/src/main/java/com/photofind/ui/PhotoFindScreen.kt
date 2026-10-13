@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -14,23 +15,30 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -40,12 +48,15 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDateRangePickerState
@@ -56,6 +67,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -73,6 +85,21 @@ import com.photofind.search.IndexedPhoto
 import java.text.NumberFormat
 import java.time.LocalDate
 
+private sealed interface GridEntry {
+    val key: String
+    val dateTaken: Long
+
+    data class Day(val date: LocalDate, val photos: List<IndexedPhoto>) : GridEntry {
+        override val key: String get() = "day-$date"
+        override val dateTaken: Long get() = photos.first().dateTaken
+    }
+
+    data class Photo(val photo: IndexedPhoto) : GridEntry {
+        override val key: String get() = photo.key
+        override val dateTaken: Long get() = photo.dateTaken
+    }
+}
+
 @Composable
 fun PhotoFindScreen(
     viewModel: MainViewModel,
@@ -81,10 +108,22 @@ fun PhotoFindScreen(
     onSharePhoto: (Uri) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // Hoisted so each grid keeps its position while the other one is on screen.
+    val libraryGrid = rememberLazyGridState()
+    val resultsGrid = rememberLazyGridState()
+    val snackbar = remember { SnackbarHostState() }
 
-    BackHandler(enabled = state.activeSearch != null && state.selection == null) { viewModel.goHome() }
+    BackHandler(enabled = state.selection == null && (state.canGoBack || state.selecting)) { viewModel.back() }
+
+    LaunchedEffect(state.notice) {
+        state.notice?.let {
+            snackbar.showSnackbar(it)
+            viewModel.dismissNotice()
+        }
+    }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             Column(
                 Modifier
@@ -94,7 +133,7 @@ fun PhotoFindScreen(
                     .padding(top = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                SearchField(state, viewModel)
+                if (state.selecting) SelectionBar(state, viewModel) else SearchField(state, viewModel)
                 FilterRow(state, viewModel)
                 StatusLine(state, viewModel)
             }
@@ -104,7 +143,7 @@ fun PhotoFindScreen(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 12.dp),
+                .padding(start = 12.dp, end = 4.dp),
         ) {
             when {
                 !state.hasStorageAccess -> SetupCard(
@@ -121,11 +160,27 @@ fun PhotoFindScreen(
                     action = "Check again",
                     onAction = viewModel::refreshEnvironment,
                 )
-                state.activeSearch == null -> LibraryGrid(state.libraryInRange) { viewModel.select(it, null) }
+                state.activeSearch == null -> LibraryGrid(
+                    photos = state.libraryInRange,
+                    gridState = libraryGrid,
+                    selectedKeys = state.selectedKeys,
+                    onTap = { photo ->
+                        if (state.selecting) viewModel.toggleSelected(photo.key) else viewModel.open(photo, null)
+                    },
+                    onLongPress = { viewModel.toggleSelected(it.key) },
+                )
                 else -> ResultsGrid(
                     results = state.sortedResults,
-                    onOpen = { viewModel.select(it.photo, it.score) },
-                    onSimilar = { viewModel.findSimilar(it.photo) },
+                    gridState = resultsGrid,
+                    scrollTo = state.resultsScroll,
+                    scrollRequest = state.scrollRequest,
+                    onScrolled = viewModel::onResultsScrolled,
+                    selectedKeys = state.selectedKeys,
+                    onTap = { hit ->
+                        if (state.selecting) viewModel.toggleSelected(hit.photo.key)
+                        else viewModel.open(hit.photo, hit.score)
+                    },
+                    onLongPress = { viewModel.toggleSelected(it.photo.key) },
                 )
             }
         }
@@ -134,18 +189,20 @@ fun PhotoFindScreen(
     state.selection?.let { selection ->
         PhotoDetail(
             selection = selection,
-            onClose = viewModel::closeSelection,
+            onClose = viewModel::back,
             onSimilar = { viewModel.findSimilar(selection.photo) },
             onOpen = { onOpenPhoto(selection.photo.uri) },
             onShare = { onSharePhoto(selection.photo.uri) },
+            onDelete = { viewModel.deletePhoto(selection.photo) },
         )
     }
+
+    state.deleteConfirm?.let { plan -> DeleteConfirmDialog(plan, viewModel) }
 }
 
 @Composable
 private fun SearchField(state: UiState, viewModel: MainViewModel) {
     val keyboard = LocalSoftwareKeyboardController.current
-    val inSearch = state.activeSearch != null
     OutlinedTextField(
         value = state.query,
         onValueChange = viewModel::onQueryChange,
@@ -153,18 +210,25 @@ private fun SearchField(state: UiState, viewModel: MainViewModel) {
         placeholder = { Text("Describe the photo… / Opisz zdjęcie…") },
         singleLine = true,
         leadingIcon = {
-            if (inSearch) {
-                IconButton(onClick = viewModel::goHome) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "All photos")
+            if (state.canGoBack) {
+                IconButton(onClick = viewModel::back) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
             } else {
                 Icon(Icons.Default.Search, contentDescription = null)
             }
         },
         trailingIcon = {
-            if (state.query.isNotEmpty()) {
-                IconButton(onClick = { viewModel.onQueryChange("") }) {
-                    Icon(Icons.Default.Close, contentDescription = "Clear")
+            Row {
+                if (state.query.isNotEmpty()) {
+                    IconButton(onClick = { viewModel.onQueryChange("") }) {
+                        Icon(Icons.Default.Close, contentDescription = "Clear")
+                    }
+                }
+                if (state.activeSearch != null) {
+                    IconButton(onClick = viewModel::goHome) {
+                        Icon(Icons.Default.Home, contentDescription = "All photos")
+                    }
                 }
             }
         },
@@ -176,31 +240,86 @@ private fun SearchField(state: UiState, viewModel: MainViewModel) {
     )
 }
 
+@Composable
+private fun SelectionBar(state: UiState, viewModel: MainViewModel) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(56.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = viewModel::clearSelected) {
+            Icon(Icons.Default.Close, contentDescription = "Cancel selection")
+        }
+        Text(
+            "${state.selectedKeys.size} selected",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = viewModel::selectAll) { Text("Select all") }
+        IconButton(onClick = viewModel::requestDelete) {
+            Icon(Icons.Default.Delete, contentDescription = "Delete selected")
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FilterRow(state: UiState, viewModel: MainViewModel) {
     var sortMenu by remember { mutableStateOf(false) }
+    var periodMenu by remember { mutableStateOf(false) }
     var pickingDates by rememberSaveable { mutableStateOf(false) }
+    val years = remember(state.library) {
+        state.library.map { localDate(it.dateTaken).year }.distinct().sortedDescending()
+    }
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         val range = state.dateRange
-        FilterChip(
-            selected = range != null,
-            onClick = { pickingDates = true },
-            label = { Text(range?.let(::formatRange) ?: "Any date") },
-            leadingIcon = { Icon(Icons.Default.DateRange, contentDescription = null, Modifier.size(18.dp)) },
-            trailingIcon = range?.let {
-                {
-                    Icon(
-                        Icons.Default.Close,
-                        contentDescription = "Clear dates",
-                        modifier = Modifier
-                            .size(18.dp)
-                            .clickable { viewModel.setDateRange(null) },
+        Box {
+            FilterChip(
+                selected = range != null,
+                onClick = { periodMenu = true },
+                label = { Text(range?.let(::formatRange) ?: "Any date") },
+                leadingIcon = { Icon(Icons.Default.DateRange, contentDescription = null, Modifier.size(18.dp)) },
+                trailingIcon = range?.let {
+                    {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Clear dates",
+                            modifier = Modifier
+                                .size(18.dp)
+                                .clickable { viewModel.setDateRange(null) },
+                        )
+                    }
+                },
+            )
+            DropdownMenu(expanded = periodMenu, onDismissRequest = { periodMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Any date") },
+                    onClick = {
+                        viewModel.setDateRange(null)
+                        periodMenu = false
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Custom range…") },
+                    onClick = {
+                        periodMenu = false
+                        pickingDates = true
+                    },
+                )
+                HorizontalDivider()
+                quickPeriods(years).forEach { period ->
+                    DropdownMenuItem(
+                        text = { Text(period.label) },
+                        onClick = {
+                            viewModel.setDateRange(period.range)
+                            periodMenu = false
+                        },
                     )
                 }
-            },
-        )
+            }
+        }
         if (state.activeSearch != null) {
             Box {
                 FilterChip(
@@ -322,81 +441,165 @@ private fun SetupCard(title: String, body: String, action: String, onAction: () 
     }
 }
 
+@Composable
+private fun DeleteConfirmDialog(plan: DeletePlan, viewModel: MainViewModel) {
+    AlertDialog(
+        onDismissRequest = viewModel::cancelDelete,
+        icon = { Icon(Icons.Default.Delete, contentDescription = null) },
+        title = { Text("Delete ${plan.size} photos?") },
+        text = {
+            val hidden = plan.permanent.size
+            Text(
+                buildString {
+                    append("$hidden ")
+                    append(if (hidden == 1) "photo is" else "photos are")
+                    append(" in a hidden folder (for example WhatsApp “Sent”), so Android can't move ")
+                    append(if (hidden == 1) "it" else "them")
+                    append(" to the trash. ")
+                    append(if (hidden == 1) "It" else "They")
+                    append(" will be deleted permanently.")
+                    if (plan.trash.isNotEmpty()) {
+                        append("\n\nThe other ${plan.trash.size} will go to the trash; Android asks to confirm next.")
+                    }
+                },
+            )
+        },
+        confirmButton = { TextButton(onClick = viewModel::confirmDelete) { Text("Delete") } },
+        dismissButton = { TextButton(onClick = viewModel::cancelDelete) { Text("Cancel") } },
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun LibraryGrid(photos: List<IndexedPhoto>, onOpen: (IndexedPhoto) -> Unit) {
-    val days: List<Pair<LocalDate, List<IndexedPhoto>>> = remember(photos) {
-        photos.groupBy { localDate(it.dateTaken) }.toList()
+private fun LibraryGrid(
+    photos: List<IndexedPhoto>,
+    gridState: LazyGridState,
+    selectedKeys: Set<String>,
+    onTap: (IndexedPhoto) -> Unit,
+    onLongPress: (IndexedPhoto) -> Unit,
+) {
+    val entries: List<GridEntry> = remember(photos) {
+        photos.groupBy { localDate(it.dateTaken) }.flatMap { (day, dayPhotos) ->
+            listOf(GridEntry.Day(day, dayPhotos)) + dayPhotos.map { GridEntry.Photo(it) }
+        }
     }
-    val gridState = rememberLazyGridState()
     // A reload keeps the grid anchored to the item on screen; stay on the newest day instead.
     LaunchedEffect(photos.firstOrNull()?.key) {
         if (gridState.firstVisibleItemIndex < 3) gridState.scrollToItem(0)
     }
-    LazyVerticalGrid(
-        state = gridState,
-        columns = GridCells.Adaptive(96.dp),
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp),
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        days.forEach { (day, dayPhotos) ->
-            item(key = "day-$day", span = { GridItemSpan(maxLineSpan) }) {
-                Text(
-                    formatDay(day),
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
-                )
-            }
-            items(dayPhotos, key = { it.key }) { photo ->
-                Thumbnail(photo, modifier = Modifier.combinedClickable(onClick = { onOpen(photo) }))
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Adaptive(96.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(end = 18.dp),
+        ) {
+            items(
+                entries,
+                key = { it.key },
+                span = { if (it is GridEntry.Day) GridItemSpan(maxLineSpan) else GridItemSpan(1) },
+            ) { entry ->
+                when (entry) {
+                    is GridEntry.Day -> Text(
+                        formatDay(entry.date),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+                    )
+                    is GridEntry.Photo -> Box(
+                        Modifier.combinedClickable(
+                            onClick = { onTap(entry.photo) },
+                            onLongClick = { onLongPress(entry.photo) },
+                        ),
+                    ) {
+                        Thumbnail(entry.photo, selected = entry.photo.key in selectedKeys, selecting = selectedKeys.isNotEmpty())
+                    }
+                }
             }
         }
+        FastScroller(gridState, entries.size) { formatMonthYear(entries[it].dateTaken) }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ResultsGrid(results: List<Hit>, onOpen: (Hit) -> Unit, onSimilar: (Hit) -> Unit) {
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(110.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        items(results, key = { it.photo.key }) { hit ->
-            Box(
-                Modifier.combinedClickable(
-                    onClick = { onOpen(hit) },
-                    onLongClick = { onSimilar(hit) },
-                ),
-            ) {
-                Thumbnail(hit.photo)
-                Text(
-                    formatShortDate(hit.photo.dateTaken),
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .fillMaxWidth()
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    maxLines = 1,
-                )
+private fun ResultsGrid(
+    results: List<Hit>,
+    gridState: LazyGridState,
+    scrollTo: Int,
+    scrollRequest: Int,
+    onScrolled: (Int) -> Unit,
+    selectedKeys: Set<String>,
+    onTap: (Hit) -> Unit,
+    onLongPress: (Hit) -> Unit,
+) {
+    LaunchedEffect(scrollRequest) { gridState.scrollToItem(scrollTo) }
+    LaunchedEffect(gridState) {
+        snapshotFlow { gridState.firstVisibleItemIndex }.collect(onScrolled)
+    }
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Adaptive(110.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(end = 18.dp),
+        ) {
+            items(results, key = { it.photo.key }) { hit ->
+                Box(
+                    Modifier.combinedClickable(
+                        onClick = { onTap(hit) },
+                        onLongClick = { onLongPress(hit) },
+                    ),
+                ) {
+                    Thumbnail(hit.photo, selected = hit.photo.key in selectedKeys, selecting = selectedKeys.isNotEmpty())
+                    Text(
+                        formatShortDate(hit.photo.dateTaken),
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .background(Color.Black.copy(alpha = 0.5f))
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        maxLines = 1,
+                    )
+                }
             }
         }
+        FastScroller(gridState, results.size) { formatMonthYear(results[it].photo.dateTaken) }
     }
 }
 
 @Composable
-private fun Thumbnail(photo: IndexedPhoto, modifier: Modifier = Modifier) {
-    AsyncImage(
-        model = photo.uri,
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        modifier = modifier
-            .aspectRatio(1f)
-            .background(MaterialTheme.colorScheme.surfaceVariant),
-    )
+private fun Thumbnail(photo: IndexedPhoto, selected: Boolean, selecting: Boolean) {
+    Box {
+        AsyncImage(
+            model = photo.uri,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .aspectRatio(1f)
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .then(if (selected) Modifier.padding(8.dp) else Modifier),
+        )
+        if (selecting) {
+            val tint = if (selected) MaterialTheme.colorScheme.primary else Color.White
+            Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .padding(4.dp)
+                    .size(22.dp)
+                    .background(if (selected) Color.White else Color.Black.copy(alpha = 0.3f), CircleShape)
+                    .border(1.5.dp, Color.White, CircleShape),
+            ) {
+                if (selected) Icon(Icons.Default.CheckCircle, contentDescription = "Selected", tint = tint)
+            }
+        }
+    }
 }

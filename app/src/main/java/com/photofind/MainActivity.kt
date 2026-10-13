@@ -5,12 +5,20 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -30,6 +38,22 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
             .launch(Manifest.permission.POST_NOTIFICATIONS)
+        val trashLauncher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+            viewModel.onTrashResult(confirmed = it.resultCode == RESULT_OK)
+        }
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.state.map { it.trashRequest }.distinctUntilChanged().collect { uris ->
+                    if (uris != null) {
+                        // Android shows its own "Move to trash?" dialog; trashed items stay restorable for 30 days.
+                        val request = MediaStore.createTrashRequest(contentResolver, uris, true)
+                        viewModel.onTrashLaunched()
+                        trashLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+                    }
+                }
+            }
+        }
 
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
