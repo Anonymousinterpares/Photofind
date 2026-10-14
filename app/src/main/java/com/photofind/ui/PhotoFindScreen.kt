@@ -101,6 +101,7 @@ private sealed interface GridEntry {
 @Composable
 fun PhotoFindScreen(
     viewModel: MainViewModel,
+    peopleViewModel: PeopleViewModel,
     onGrantStorage: () -> Unit,
     onOpenPhoto: (Uri) -> Unit,
     onSharePhoto: (Uri) -> Unit,
@@ -118,6 +119,12 @@ fun PhotoFindScreen(
             snackbar.showSnackbar(it)
             viewModel.dismissNotice()
         }
+    }
+
+    val people by peopleViewModel.state.collectAsStateWithLifecycle()
+    if (people.open) {
+        PeopleScreen(people, peopleViewModel)
+        return
     }
 
     state.duplicates?.let { view ->
@@ -139,7 +146,7 @@ fun PhotoFindScreen(
             ) {
                 if (state.selecting) SelectionBar(state, viewModel) else SearchField(state, viewModel)
                 FilterRow(state, viewModel)
-                StatusLine(state, viewModel)
+                StatusLine(state, viewModel, onPeople = peopleViewModel::open)
             }
         },
     ) { padding ->
@@ -372,7 +379,7 @@ private fun FilterRow(state: UiState, viewModel: MainViewModel) {
 }
 
 @Composable
-private fun StatusLine(state: UiState, viewModel: MainViewModel) {
+private fun StatusLine(state: UiState, viewModel: MainViewModel, onPeople: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     val progress = state.indexing
     val count = NumberFormat.getIntegerInstance().format(state.indexedCount)
@@ -406,6 +413,14 @@ private fun StatusLine(state: UiState, viewModel: MainViewModel) {
                         enabled = progress == null,
                         onClick = {
                             viewModel.reindex()
+                            menu = false
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("People") },
+                        enabled = state.indexedCount > 0,
+                        onClick = {
+                            onPeople()
                             menu = false
                         },
                     )

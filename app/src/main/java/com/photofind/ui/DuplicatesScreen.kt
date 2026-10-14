@@ -134,7 +134,7 @@ fun DuplicatesScreen(state: UiState, view: DuplicatesView, viewModel: MainViewMo
         }
     }
 
-    preview?.let { photo -> Preview(photo) { preview = null } }
+    preview?.let { photo -> PhotoPreview(photo) { preview = null } }
 }
 
 @Composable
@@ -285,8 +285,9 @@ private fun copyLabels(photos: List<IndexedPhoto>): Map<String, String> {
 
 private const val STORAGE_ROOT = "/storage/emulated/0"
 
+/** A photo full screen, zoomable, with its path; used where the main detail view's actions don't fit. */
 @Composable
-private fun Preview(photo: IndexedPhoto, onClose: () -> Unit) {
+internal fun PhotoPreview(photo: IndexedPhoto, onClose: () -> Unit) {
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),

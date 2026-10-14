@@ -15,7 +15,7 @@ import java.nio.ByteOrder
  * One row per photo on the device. A row with a NULL embedding is a photo that could not be
  * decoded or embedded; it is kept so it isn't retried until the file changes.
  */
-class PhotoStore(context: Context) : SQLiteOpenHelper(context, "photofind.db", null, 1) {
+class PhotoStore(context: Context) : SQLiteOpenHelper(context, "photofind.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -29,9 +29,33 @@ class PhotoStore(context: Context) : SQLiteOpenHelper(context, "photofind.db", n
             )
             """.trimIndent(),
         )
+        FaceStore.createTables(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) FaceStore.createTables(db)
+    }
+
+    /** Every photo that was embedded, newest first; faces are looked for in these. */
+    fun embeddedPhotos(): List<PhotoFile> {
+        val out = ArrayList<PhotoFile>()
+        readableDatabase.rawQuery(
+            "SELECT key, uri, date_taken, signature FROM photos WHERE embedding IS NOT NULL ORDER BY date_taken DESC",
+            null,
+        ).use { c ->
+            while (c.moveToNext()) {
+                val signature = c.getString(3)
+                out += PhotoFile(
+                    key = c.getString(0),
+                    uri = Uri.parse(c.getString(1)),
+                    dateTaken = c.getLong(2),
+                    modified = signature.substringBefore(':').toLongOrNull() ?: 0L,
+                    size = signature.substringAfter(':').toLongOrNull() ?: 0L,
+                )
+            }
+        }
+        return out
+    }
 
     fun signatures(): Map<String, String> {
         val out = HashMap<String, String>()
@@ -71,7 +95,10 @@ class PhotoStore(context: Context) : SQLiteOpenHelper(context, "photofind.db", n
         val db = writableDatabase
         db.beginTransaction()
         try {
-            keys.forEach { db.delete("photos", "key = ?", arrayOf(it)) }
+            keys.forEach {
+                db.delete("photos", "key = ?", arrayOf(it))
+                FaceStore.deleteForPhoto(db, it)
+            }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()

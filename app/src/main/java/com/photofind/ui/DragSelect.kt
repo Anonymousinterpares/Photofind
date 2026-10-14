@@ -29,8 +29,8 @@ import androidx.compose.ui.unit.dp
  * A tap calls [onTap]. A long press toggles the photo under the finger; dragging without lifting
  * then extends that change to every photo between the first one and the one under the finger,
  * scrolling the grid when the finger nears the top or bottom edge. Starting on a selected photo
- * deselects instead. [photoKeys] are the grid's photo keys in display order; other grid items
- * (day headers) are skipped.
+ * deselects instead. [photoKeys] are the grid's photo keys in display order, and must be the
+ * same values as the grid's item keys; other grid items (day headers) are skipped.
  */
 @Composable
 fun Modifier.dragToSelect(

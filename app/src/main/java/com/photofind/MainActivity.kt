@@ -26,12 +26,14 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.core.content.FileProvider
 import com.photofind.ui.MainViewModel
+import com.photofind.ui.PeopleViewModel
 import com.photofind.ui.PhotoFindScreen
 import java.io.File
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
+    private val peopleViewModel: PeopleViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,6 +61,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
                 PhotoFindScreen(
                     viewModel = viewModel,
+                    peopleViewModel = peopleViewModel,
                     onGrantStorage = ::openAllFilesSettings,
                     onOpenPhoto = ::openPhoto,
                     onSharePhoto = ::sharePhoto,
