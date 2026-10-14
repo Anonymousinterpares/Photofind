@@ -2,11 +2,9 @@ package com.photofind.ui
 
 import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -122,6 +120,12 @@ fun PhotoFindScreen(
         }
     }
 
+    state.duplicates?.let { view ->
+        DuplicatesScreen(state, view, viewModel, snackbar)
+        state.deleteConfirm?.let { plan -> DeleteConfirmDialog(plan, viewModel) }
+        return
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
@@ -167,7 +171,7 @@ fun PhotoFindScreen(
                     onTap = { photo ->
                         if (state.selecting) viewModel.toggleSelected(photo.key) else viewModel.open(photo, null)
                     },
-                    onLongPress = { viewModel.toggleSelected(it.key) },
+                    onSelectionChange = viewModel::setSelected,
                 )
                 else -> ResultsGrid(
                     results = state.sortedResults,
@@ -180,7 +184,7 @@ fun PhotoFindScreen(
                         if (state.selecting) viewModel.toggleSelected(hit.photo.key)
                         else viewModel.open(hit.photo, hit.score)
                     },
-                    onLongPress = { viewModel.toggleSelected(it.photo.key) },
+                    onSelectionChange = viewModel::setSelected,
                 )
             }
         }
@@ -405,6 +409,14 @@ private fun StatusLine(state: UiState, viewModel: MainViewModel) {
                             menu = false
                         },
                     )
+                    DropdownMenuItem(
+                        text = { Text("Duplicates & similar") },
+                        enabled = state.indexedCount > 0,
+                        onClick = {
+                            viewModel.openDuplicates()
+                            menu = false
+                        },
+                    )
                 }
             }
         }
@@ -469,20 +481,21 @@ private fun DeleteConfirmDialog(plan: DeletePlan, viewModel: MainViewModel) {
     )
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LibraryGrid(
     photos: List<IndexedPhoto>,
     gridState: LazyGridState,
     selectedKeys: Set<String>,
     onTap: (IndexedPhoto) -> Unit,
-    onLongPress: (IndexedPhoto) -> Unit,
+    onSelectionChange: (Set<String>) -> Unit,
 ) {
     val entries: List<GridEntry> = remember(photos) {
         photos.groupBy { localDate(it.dateTaken) }.flatMap { (day, dayPhotos) ->
             listOf(GridEntry.Day(day, dayPhotos)) + dayPhotos.map { GridEntry.Photo(it) }
         }
     }
+    val photoKeys = remember(entries) { entries.filterIsInstance<GridEntry.Photo>().map { it.key } }
+    val byKey = remember(photos) { photos.associateBy { it.key } }
     // A reload keeps the grid anchored to the item on screen; stay on the newest day instead.
     LaunchedEffect(photos.firstOrNull()?.key) {
         if (gridState.firstVisibleItemIndex < 3) gridState.scrollToItem(0)
@@ -495,7 +508,8 @@ private fun LibraryGrid(
             verticalArrangement = Arrangement.spacedBy(3.dp),
             modifier = Modifier
                 .fillMaxSize()
-                .padding(end = 18.dp),
+                .padding(end = 18.dp)
+                .dragToSelect(gridState, photoKeys, selectedKeys, { onTap(byKey.getValue(it)) }, onSelectionChange),
         ) {
             items(
                 entries,
@@ -509,14 +523,8 @@ private fun LibraryGrid(
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
                     )
-                    is GridEntry.Photo -> Box(
-                        Modifier.combinedClickable(
-                            onClick = { onTap(entry.photo) },
-                            onLongClick = { onLongPress(entry.photo) },
-                        ),
-                    ) {
+                    is GridEntry.Photo ->
                         Thumbnail(entry.photo, selected = entry.photo.key in selectedKeys, selecting = selectedKeys.isNotEmpty())
-                    }
                 }
             }
         }
@@ -524,7 +532,6 @@ private fun LibraryGrid(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ResultsGrid(
     results: List<Hit>,
@@ -534,8 +541,10 @@ private fun ResultsGrid(
     onScrolled: (Int) -> Unit,
     selectedKeys: Set<String>,
     onTap: (Hit) -> Unit,
-    onLongPress: (Hit) -> Unit,
+    onSelectionChange: (Set<String>) -> Unit,
 ) {
+    val photoKeys = remember(results) { results.map { it.photo.key } }
+    val byKey = remember(results) { results.associateBy { it.photo.key } }
     LaunchedEffect(scrollRequest) { gridState.scrollToItem(scrollTo) }
     LaunchedEffect(gridState) {
         snapshotFlow { gridState.firstVisibleItemIndex }.collect(onScrolled)
@@ -548,15 +557,11 @@ private fun ResultsGrid(
             verticalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier
                 .fillMaxSize()
-                .padding(end = 18.dp),
+                .padding(end = 18.dp)
+                .dragToSelect(gridState, photoKeys, selectedKeys, { onTap(byKey.getValue(it)) }, onSelectionChange),
         ) {
             items(results, key = { it.photo.key }) { hit ->
-                Box(
-                    Modifier.combinedClickable(
-                        onClick = { onTap(hit) },
-                        onLongClick = { onLongPress(hit) },
-                    ),
-                ) {
+                Box {
                     Thumbnail(hit.photo, selected = hit.photo.key in selectedKeys, selecting = selectedKeys.isNotEmpty())
                     Text(
                         formatShortDate(hit.photo.dateTaken),
@@ -577,7 +582,7 @@ private fun ResultsGrid(
 }
 
 @Composable
-private fun Thumbnail(photo: IndexedPhoto, selected: Boolean, selecting: Boolean) {
+internal fun Thumbnail(photo: IndexedPhoto, selected: Boolean, selecting: Boolean) {
     Box {
         AsyncImage(
             model = photo.uri,

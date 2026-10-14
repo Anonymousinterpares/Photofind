@@ -119,7 +119,7 @@ fun PhotoDetail(
 }
 
 @Composable
-private fun ZoomableImage(photo: com.photofind.search.IndexedPhoto, modifier: Modifier) {
+internal fun ZoomableImage(photo: com.photofind.search.IndexedPhoto, modifier: Modifier) {
     val context = LocalContext.current
     var scale by remember(photo.key) { mutableFloatStateOf(1f) }
     var offset by remember(photo.key) { mutableStateOf(Offset.Zero) }

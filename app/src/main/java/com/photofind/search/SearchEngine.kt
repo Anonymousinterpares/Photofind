@@ -7,7 +7,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
-data class IndexedPhoto(val key: String, val uri: Uri, val dateTaken: Long) {
+/** [size] is the file size in bytes. */
+data class IndexedPhoto(val key: String, val uri: Uri, val dateTaken: Long, val size: Long) {
     val fileName: String get() = File(key).name
     val folder: String get() = File(key).parentFile?.name.orEmpty()
 }
@@ -56,6 +57,18 @@ class SearchEngine(private val store: PhotoStore, private val embedder: Embedder
         val index = current.photos.indexOfFirst { it.key == key }
         if (index < 0) return SearchResult(emptyList(), 0, 0)
         return rank(current.row(index), excludeKey = key, range = range, limit = limit, embedMillis = 0)
+    }
+
+    /** Groups of byte-identical copies of one photo, e.g. the same WhatsApp image in two folders. */
+    suspend fun identicalCopies(): List<PhotoGroup> {
+        val current = snapshot()
+        return withContext(Dispatchers.Default) { current.identicalCopies() }
+    }
+
+    /** Groups of near-identical shots (bursts, re-sent or edited copies); copies count once. */
+    suspend fun similarShots(threshold: Float): List<PhotoGroup> {
+        val current = snapshot()
+        return withContext(Dispatchers.Default) { current.similarShots(threshold) }
     }
 
     private suspend fun snapshot(): Snapshot =

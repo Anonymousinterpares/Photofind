@@ -12,6 +12,7 @@ import com.photofind.photoFind
 import com.photofind.search.DateRange
 import com.photofind.search.Hit
 import com.photofind.search.IndexedPhoto
+import com.photofind.search.PhotoGroup
 import com.photofind.search.SearchResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,6 +36,24 @@ sealed interface ActiveSearch {
     data class Text(val query: String) : ActiveSearch
     data class Similar(val photo: IndexedPhoto) : ActiveSearch
 }
+
+enum class DuplicateMode(val label: String) {
+    Copies("Identical copies"),
+    Similar("Similar shots"),
+}
+
+enum class Likeness(val label: String, val threshold: Float) {
+    Strict("Nearly identical", 0.97f),
+    Normal("Very similar", 0.93f),
+    Loose("Similar", 0.90f),
+}
+
+/** The duplicates screen; [groups] is null while they are being found. */
+data class DuplicatesView(
+    val mode: DuplicateMode = DuplicateMode.Copies,
+    val likeness: Likeness = Likeness.Normal,
+    val groups: List<PhotoGroup>? = null,
+)
 
 /** A photo opened full screen; [score] is set when it came from a search. */
 data class Selection(val photo: IndexedPhoto, val score: Float?)
@@ -78,6 +97,7 @@ data class UiState(
     val deleteConfirm: DeletePlan? = null,
     val trashRequest: List<Uri>? = null,
     val notice: String? = null,
+    val duplicates: DuplicatesView? = null,
 ) {
     val selecting: Boolean get() = selectedKeys.isNotEmpty()
 
@@ -107,6 +127,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingDelete: DeletePlan? = null
     private var deletingFromDetail = false
     private var searchJob: Job? = null
+    private var duplicatesJob: Job? = null
     private var autoIndexed = false
 
     init {
@@ -225,6 +246,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         it.copy(selectedKeys = if (key in it.selectedKeys) it.selectedKeys - key else it.selectedKeys + key)
     }
 
+    fun setSelected(keys: Set<String>) = _state.update { it.copy(selectedKeys = keys) }
+
     fun selectAll() = _state.update { it.copy(selectedKeys = it.visibleKeys.toSet()) }
 
     fun clearSelected() = _state.update { it.copy(selectedKeys = emptySet()) }
@@ -299,6 +322,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     indexedCount = s.indexedCount - removed.size,
                     results = s.results.filterNot { it.photo.key in deletedKeys },
                     selection = s.selection?.takeUnless { it.photo.key in deletedKeys },
+                    duplicates = s.duplicates?.let { d ->
+                        d.copy(groups = d.groups?.mapNotNull { it.without(deletedKeys) })
+                    },
                     selectedKeys = emptySet(),
                     notice = buildString {
                         if (plan.trash.isNotEmpty()) append("Moved ${plan.trash.size} to trash")
@@ -315,6 +341,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun dismissNotice() = _state.update { it.copy(notice = null) }
+
+    // Duplicates
+
+    fun openDuplicates() {
+        _state.update { it.copy(duplicates = DuplicatesView(), selectedKeys = emptySet()) }
+        findDuplicates()
+    }
+
+    fun closeDuplicates() {
+        duplicatesJob?.cancel()
+        _state.update { it.copy(duplicates = null, selectedKeys = emptySet()) }
+    }
+
+    /** Back on the duplicates screen: clears a selection first, then closes the screen. */
+    fun duplicatesBack() = if (_state.value.selecting) clearSelected() else closeDuplicates()
+
+    fun setDuplicateMode(mode: DuplicateMode) {
+        _state.update { it.copy(duplicates = it.duplicates?.copy(mode = mode), selectedKeys = emptySet()) }
+        findDuplicates()
+    }
+
+    fun setLikeness(likeness: Likeness) {
+        _state.update { it.copy(duplicates = it.duplicates?.copy(likeness = likeness), selectedKeys = emptySet()) }
+        findDuplicates()
+    }
+
+    /** Selects every photo except the suggested one to keep, in [group] or in all groups. */
+    fun selectExtras(group: PhotoGroup? = null) = _state.update { s ->
+        val groups = group?.let(::listOf) ?: s.duplicates?.groups.orEmpty()
+        val keep = groups.mapTo(HashSet()) { it.keep.key }
+        val extras = groups.flatMap { g -> g.extras.map { it.key } }
+        s.copy(selectedKeys = s.selectedKeys - keep + extras)
+    }
+
+    private fun findDuplicates() {
+        val view = _state.value.duplicates ?: return
+        duplicatesJob?.cancel()
+        _state.update { it.copy(duplicates = view.copy(groups = null)) }
+        duplicatesJob = viewModelScope.launch {
+            val groups = when (view.mode) {
+                DuplicateMode.Copies -> app.search.identicalCopies()
+                DuplicateMode.Similar -> app.search.similarShots(view.likeness.threshold)
+            }.mapNotNull { it.without(deletedKeys) }
+            _state.update { it.copy(duplicates = it.duplicates?.copy(groups = groups)) }
+        }
+    }
 
     // Search and indexing
 

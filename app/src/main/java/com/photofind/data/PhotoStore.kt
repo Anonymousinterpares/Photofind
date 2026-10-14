@@ -87,19 +87,20 @@ class PhotoStore(context: Context) : SQLiteOpenHelper(context, "photofind.db", n
         var matrix = FloatArray(0)
         var dim = 0
         readableDatabase.rawQuery(
-            "SELECT key, uri, date_taken, embedding FROM photos " +
+            "SELECT key, uri, date_taken, embedding, signature FROM photos " +
                 "WHERE embedding IS NOT NULL ORDER BY date_taken DESC",
             null,
         ).use { c ->
             while (c.moveToNext()) {
                 val vector = decode(c.getBlob(3))
+                val size = c.getString(4).substringAfter(':').toLongOrNull() ?: 0L
                 if (dim == 0) {
                     dim = vector.size
                     matrix = FloatArray(dim * c.count)
                 }
                 if (vector.size != dim) continue
                 vector.copyInto(matrix, photos.size * dim)
-                photos += IndexedPhoto(c.getString(0), Uri.parse(c.getString(1)), c.getLong(2))
+                photos += IndexedPhoto(c.getString(0), Uri.parse(c.getString(1)), c.getLong(2), size)
             }
         }
         return Snapshot(photos, dim, matrix)
