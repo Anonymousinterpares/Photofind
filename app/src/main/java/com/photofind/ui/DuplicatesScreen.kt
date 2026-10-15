@@ -134,7 +134,15 @@ fun DuplicatesScreen(state: UiState, view: DuplicatesView, viewModel: MainViewMo
         }
     }
 
-    preview?.let { photo -> PhotoPreview(photo) { preview = null } }
+    preview?.let { photo ->
+        PhotoPreview(
+            photo,
+            onDelete = {
+                preview = null
+                viewModel.deletePhotos(listOf(photo))
+            },
+        ) { preview = null }
+    }
 }
 
 @Composable
@@ -287,7 +295,7 @@ private const val STORAGE_ROOT = "/storage/emulated/0"
 
 /** A photo full screen, zoomable, with its path; used where the main detail view's actions don't fit. */
 @Composable
-internal fun PhotoPreview(photo: IndexedPhoto, onClose: () -> Unit) {
+internal fun PhotoPreview(photo: IndexedPhoto, onDelete: (() -> Unit)? = null, onClose: () -> Unit) {
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
@@ -309,7 +317,13 @@ internal fun PhotoPreview(photo: IndexedPhoto, onClose: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
+                if (onDelete != null) {
+                    IconButton(onClick = onDelete) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.White)
+                    }
+                }
             }
             ZoomableImage(
                 photo = photo,

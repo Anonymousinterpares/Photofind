@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.util.Log
 import java.text.Collator
 
 enum class PeopleSort(val label: String) {
@@ -73,6 +74,10 @@ data class PeopleState(
 
 /** People found by face recognition: browsing them, naming, merging and correcting. */
 class PeopleViewModel(application: Application) : AndroidViewModel(application) {
+
+    private companion object {
+        const val TAG = "People"
+    }
 
     private val app = application.photoFind
     private val _state = MutableStateFlow(PeopleState())
@@ -225,11 +230,23 @@ class PeopleViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun write(then: () -> Unit = {}, block: () -> Unit) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { block() }
+            val failure = withContext(Dispatchers.IO) { runCatching(block).exceptionOrNull() }
             reload()
             reloadPerson()
-            then()
+            if (failure == null) {
+                then()
+            } else {
+                Log.e(TAG, "People change failed", failure)
+                _state.update { it.copy(scanMessage = "Could not save the change: ${failure.message ?: failure}") }
+            }
         }
+    }
+
+    /** Reloads people and the open person, e.g. after photos were deleted. */
+    fun refresh() {
+        if (!_state.value.open) return
+        reload()
+        reloadPerson()
     }
 
     private fun reload() {

@@ -30,7 +30,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -68,15 +71,21 @@ import java.text.NumberFormat
 
 /** People found in the photos; a person opens their faces, where wrong ones can be taken out. */
 @Composable
-fun PeopleScreen(state: PeopleState, viewModel: PeopleViewModel) {
+fun PeopleScreen(
+    state: PeopleState,
+    viewModel: PeopleViewModel,
+    snackbar: SnackbarHostState,
+    onDeletePhotos: (List<IndexedPhoto>) -> Unit,
+) {
     BackHandler { viewModel.back() }
     val person = state.person
     if (person != null) {
-        PersonScreen(state, person, viewModel)
+        PersonScreen(state, person, viewModel, snackbar, onDeletePhotos)
         return
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             Column(
                 Modifier
@@ -294,7 +303,13 @@ private fun FolderTile(
 }
 
 @Composable
-private fun PersonScreen(state: PeopleState, view: PersonView, viewModel: PeopleViewModel) {
+private fun PersonScreen(
+    state: PeopleState,
+    view: PersonView,
+    viewModel: PeopleViewModel,
+    snackbar: SnackbarHostState,
+    onDeletePhotos: (List<IndexedPhoto>) -> Unit,
+) {
     var renaming by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf<PickPurpose?>(null) }
     var menu by remember { mutableStateOf(false) }
@@ -303,6 +318,7 @@ private fun PersonScreen(state: PeopleState, view: PersonView, viewModel: People
     val selecting = view.selected.isNotEmpty()
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             Row(
                 Modifier
@@ -328,6 +344,15 @@ private fun PersonScreen(state: PeopleState, view: PersonView, viewModel: People
                         TextButton(onClick = viewModel::hideSelectedFaces) { Text("Hide") }
                     } else {
                         TextButton(onClick = viewModel::removeSelectedFaces) { Text("Not them") }
+                    }
+                    IconButton(
+                        onClick = {
+                            val photos = view.faces.filter { it.id.toString() in view.selected }.map { it.photo }
+                            viewModel.setFaceSelection(emptySet())
+                            onDeletePhotos(photos)
+                        },
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete photos")
                     }
                 } else {
                     IconButton(onClick = viewModel::back) {
@@ -435,7 +460,15 @@ private fun PersonScreen(state: PeopleState, view: PersonView, viewModel: People
             naming = false
         }
     }
-    preview?.let { photo -> PhotoPreview(photo) { preview = null } }
+    preview?.let { photo ->
+        PhotoPreview(
+            photo,
+            onDelete = {
+                preview = null
+                onDeletePhotos(listOf(photo))
+            },
+        ) { preview = null }
+    }
 }
 
 private enum class PickPurpose { Merge, Move }

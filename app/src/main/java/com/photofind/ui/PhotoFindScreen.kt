@@ -124,8 +124,10 @@ fun PhotoFindScreen(
     val people by peopleViewModel.state.collectAsStateWithLifecycle()
     // Names may have changed while People was open.
     LaunchedEffect(people.open) { if (!people.open) viewModel.loadFaces() }
+    LaunchedEffect(state.deletions) { peopleViewModel.refresh() }
     if (people.open) {
-        PeopleScreen(people, peopleViewModel)
+        PeopleScreen(people, peopleViewModel, snackbar, onDeletePhotos = viewModel::deletePhotos)
+        state.deleteConfirm?.let { plan -> DeleteConfirmDialog(plan, viewModel) }
         return
     }
 

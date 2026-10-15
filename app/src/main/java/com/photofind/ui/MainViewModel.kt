@@ -122,6 +122,8 @@ data class UiState(
     /** Name tags over faces in the full-screen photo; remembered between runs. */
     val showFaceTags: Boolean = true,
     val tagging: Tagging? = null,
+    /** Counts finished deletions, so other screens (People) know to reload. */
+    val deletions: Int = 0,
 ) {
     val selecting: Boolean get() = selectedKeys.isNotEmpty()
 
@@ -354,6 +356,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         requestDelete()
     }
 
+    /** Deletes [photos] chosen outside the main grids (People, Duplicates), via the same trash flow. */
+    fun deletePhotos(photos: List<IndexedPhoto>) {
+        if (photos.isEmpty()) return
+        _state.update { it.copy(selectedKeys = emptySet()) }
+        val (trash, permanent) = photos.distinctBy { it.key }.partition { it.uri.scheme == "content" }
+        val plan = DeletePlan(trash, permanent)
+        if (permanent.isEmpty()) startDelete(plan) else _state.update { it.copy(deleteConfirm = plan) }
+    }
+
     fun requestDelete() {
         val s = _state.value
         val byKey = s.library.associateBy { it.key }
@@ -422,6 +433,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         d.copy(groups = d.groups?.mapNotNull { it.without(deletedKeys) })
                     },
                     selectedKeys = emptySet(),
+                    deletions = s.deletions + 1,
                     notice = buildString {
                         if (plan.trash.isNotEmpty()) append("Moved ${plan.trash.size} to trash")
                         val permanent = removed.size - plan.trash.size

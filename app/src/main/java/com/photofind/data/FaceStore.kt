@@ -271,9 +271,16 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
         val name = nameOf(db, into) ?: sources.firstNotNullOfOrNull { nameOf(db, it) }
         sources.forEach { source ->
             db.execSQL("UPDATE faces SET person_id = ? WHERE person_id = ?", arrayOf(into, source))
-            db.execSQL("UPDATE face_rejections SET person_id = ? WHERE person_id = ?", arrayOf(into, source))
+            // A face may have been removed from both people already; keep one such record.
+            db.execSQL("UPDATE OR IGNORE face_rejections SET person_id = ? WHERE person_id = ?", arrayOf(into, source))
+            db.execSQL("DELETE FROM face_rejections WHERE person_id = ?", arrayOf(source))
             db.execSQL("DELETE FROM persons WHERE id = ?", arrayOf(source))
         }
+        // The merged faces are this person now, whatever was said about them before.
+        db.execSQL(
+            "DELETE FROM face_rejections WHERE person_id = ? AND face_id IN (SELECT id FROM faces WHERE person_id = ?)",
+            arrayOf(into, into),
+        )
         db.execSQL("UPDATE persons SET name = ? WHERE id = ?", arrayOf(name, into))
     }
 
