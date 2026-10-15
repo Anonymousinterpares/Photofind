@@ -104,10 +104,14 @@ fun PeopleScreen(state: PeopleState, viewModel: PeopleViewModel) {
                             enabled = state.selectedPeople.size >= 2,
                         ) { Text("Same person – merge") }
                     } else {
-                        IconButton(onClick = viewModel::close) {
+                        IconButton(onClick = viewModel::back) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
-                        Text("People", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        Text(
+                            if (state.inFolder) "Unsorted" else "People",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f),
+                        )
                         SortMenu(state.sort, viewModel::setSort)
                         var menu by remember { mutableStateOf(false) }
                         Box {
@@ -165,7 +169,11 @@ private fun ScanStatus(state: PeopleState) {
     val progress = state.scanning
     val numbers = NumberFormat.getIntegerInstance()
     val text = when {
-        progress == null -> state.scanMessage ?: "${numbers.format(state.people.size)} people"
+        progress == null -> state.scanMessage ?: if (state.inFolder) {
+            "${numbers.format(state.unnamedCount)} people without a name · name one to move it to People"
+        } else {
+            "${numbers.format(state.people.size - state.unnamedCount)} named people"
+        }
         progress.total == 0 -> "Preparing face scan…"
         else -> "Looking for faces · ${numbers.format(progress.done)} / ${numbers.format(progress.total)} photos"
     }
@@ -189,25 +197,36 @@ private fun PeopleGrid(state: PeopleState, viewModel: PeopleViewModel) {
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        state.unsorted?.let { unsorted ->
-            item(key = "unsorted") {
-                Column(
-                    Modifier
-                        .clickable(enabled = !selecting) { viewModel.openPerson(unsorted) }
-                        .padding(6.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        FaceImage(unsorted.coverFaceId, Modifier.size(88.dp).clip(CircleShape))
-                        Box(Modifier.size(88.dp).background(Color.Black.copy(alpha = 0.45f), CircleShape))
-                        Text("?", color = Color.White, style = MaterialTheme.typography.headlineMedium)
-                    }
-                    Text("Unsorted faces", style = MaterialTheme.typography.bodyMedium, maxLines = 1)
-                    Text("${unsorted.faceCount} faces", style = MaterialTheme.typography.labelSmall)
+        val unsorted = state.unsorted
+        if (state.inFolder) {
+            if (unsorted != null) {
+                item(key = "unsorted") {
+                    FolderTile(
+                        coverFaceId = unsorted.coverFaceId,
+                        mark = "?",
+                        title = "Unknown",
+                        subtitle = "${unsorted.faceCount} faces",
+                        enabled = !selecting,
+                    ) { viewModel.openPerson(unsorted) }
                 }
             }
+        } else if (unsorted != null || state.unnamedCount > 0) {
+            item(key = "folder") {
+                val cover = unsorted?.coverFaceId ?: state.people.first { it.name == null }.coverFaceId
+                FolderTile(
+                    coverFaceId = cover,
+                    mark = "${state.unnamedCount + if (unsorted != null) 1 else 0}",
+                    title = "Unsorted",
+                    subtitle = buildList {
+                        if (state.unnamedCount > 0) add("${state.unnamedCount} unnamed")
+                        if (unsorted != null) add("${unsorted.faceCount} unknown faces")
+                    }.joinToString("\n"),
+                    enabled = !selecting,
+                    onClick = viewModel::openFolder,
+                )
+            }
         }
-        items(state.sortedPeople, key = { it.id }) { person ->
+        items(state.shownPeople, key = { it.id }) { person ->
             Column(
                 Modifier
                     .combinedClickable(
@@ -245,6 +264,32 @@ private fun PeopleGrid(state: PeopleState, viewModel: PeopleViewModel) {
                 Text("${person.faceCount} photos", style = MaterialTheme.typography.labelSmall)
             }
         }
+    }
+}
+
+/** A dimmed round tile with a mark over it: the Unsorted folder, or the unknown faces inside it. */
+@Composable
+private fun FolderTile(
+    coverFaceId: Long,
+    mark: String,
+    title: String,
+    subtitle: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            FaceImage(coverFaceId, Modifier.size(88.dp).clip(CircleShape))
+            Box(Modifier.size(88.dp).background(Color.Black.copy(alpha = 0.55f), CircleShape))
+            Text(mark, color = Color.White, style = MaterialTheme.typography.headlineMedium)
+        }
+        Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+        Text(subtitle, style = MaterialTheme.typography.labelSmall, maxLines = 2, textAlign = TextAlign.Center)
     }
 }
 

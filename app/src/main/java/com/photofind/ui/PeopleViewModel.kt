@@ -62,8 +62,13 @@ data class PeopleState(
     val loaded: Boolean = false,
     val selectedPeople: Set<Long> = emptySet(),
     val person: PersonView? = null,
+    /** In the Unsorted folder: unknown faces and people without a name yet. */
+    val inFolder: Boolean = false,
 ) {
-    val sortedPeople: List<Person> get() = sort.sort(people)
+    /** The people shown where we are: named ones on the main view, unnamed ones in the folder. */
+    val shownPeople: List<Person> get() = sort.sort(people.filter { (it.name == null) == inFolder })
+
+    val unnamedCount: Int get() = people.count { it.name == null }
 }
 
 /** People found by face recognition: browsing them, naming, merging and correcting. */
@@ -104,24 +109,29 @@ class PeopleViewModel(application: Application) : AndroidViewModel(application) 
             val person = withContext(Dispatchers.IO) {
                 if (personId == null) app.faces.unsorted() else app.faces.people().firstOrNull { it.id == personId }
             } ?: return@launch
+            // Back from an unnamed person (or the unsorted faces) leads to the folder they live in.
+            _state.update { it.copy(inFolder = person.unsorted || person.name == null) }
             openPerson(person)
         }
     }
+
+    fun openFolder() = _state.update { it.copy(inFolder = true, selectedPeople = emptySet()) }
 
     /** Looks for faces in photos not scanned yet (new or changed ones). */
     fun scanNow() = FaceWorker.start(getApplication())
 
     fun setSort(sort: PeopleSort) = _state.update { it.copy(sort = sort) }
 
-    fun close() = _state.update { it.copy(open = false, person = null, selectedPeople = emptySet()) }
+    fun close() = _state.update { it.copy(open = false, person = null, selectedPeople = emptySet(), inFolder = false) }
 
-    /** Clears a selection first, then leaves the person, then the People screen. */
+    /** Clears a selection first, then leaves the person, then the folder, then the People screen. */
     fun back() {
         val s = _state.value
         when {
             s.person?.selected?.isNotEmpty() == true -> setFaceSelection(emptySet())
             s.person != null -> _state.update { it.copy(person = null) }
             s.selectedPeople.isNotEmpty() -> _state.update { it.copy(selectedPeople = emptySet()) }
+            s.inFolder -> _state.update { it.copy(inFolder = false) }
             else -> close()
         }
     }
