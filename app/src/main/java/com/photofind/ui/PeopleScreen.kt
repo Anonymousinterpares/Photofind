@@ -490,7 +490,7 @@ private fun FaceImage(faceId: Long, modifier: Modifier) {
 }
 
 @Composable
-private fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+internal fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     var name by remember { mutableStateOf(current) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -527,7 +527,7 @@ private fun SortMenu(sort: PeopleSort, onSort: (PeopleSort) -> Unit) {
  * "New person" choice at the top.
  */
 @Composable
-private fun PersonPicker(
+internal fun PersonPicker(
     title: String,
     people: List<Person>,
     onDismiss: () -> Unit,

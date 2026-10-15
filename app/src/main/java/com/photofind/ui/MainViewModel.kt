@@ -8,7 +8,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import android.graphics.RectF
+import com.photofind.data.Person
 import com.photofind.data.PhotoFace
+import com.photofind.faces.ManualTagger
 import com.photofind.index.IndexWorker
 import com.photofind.photoFind
 import com.photofind.search.DateRange
@@ -67,6 +70,20 @@ data class DeletePlan(val trash: List<IndexedPhoto>, val permanent: List<Indexed
     val size: Int get() = trash.size + permanent.size
 }
 
+/**
+ * Tagging people by hand on the open photo: [box] (0..1 photo coordinates) was just drawn, or
+ * [faceId] tapped, and waits for a person to be picked; [people] are the choices.
+ */
+data class Tagging(
+    val people: List<Person> = emptyList(),
+    val box: RectF? = null,
+    val faceId: Long? = null,
+    val saving: Boolean = false,
+    val message: String? = null,
+) {
+    val picking: Boolean get() = (box != null || faceId != null) && !saving
+}
+
 /** One step of navigation history, restored as-is by [MainViewModel.back]. */
 private data class View(
     val activeSearch: ActiveSearch?,
@@ -104,6 +121,7 @@ data class UiState(
     val duplicates: DuplicatesView? = null,
     /** Name tags over faces in the full-screen photo; remembered between runs. */
     val showFaceTags: Boolean = true,
+    val tagging: Tagging? = null,
 ) {
     val selecting: Boolean get() = selectedKeys.isNotEmpty()
 
@@ -184,8 +202,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun open(photo: IndexedPhoto, score: Float?) {
         pushHistory()
-        _state.update { it.copy(selection = Selection(photo, score)) }
+        _state.update { it.copy(selection = Selection(photo, score), tagging = null) }
         loadFaces()
+    }
+
+    // Tagging people by hand
+
+    fun startTagging() {
+        _state.update { it.copy(tagging = Tagging()) }
+        viewModelScope.launch {
+            val people = withContext(Dispatchers.IO) { app.faces.people() }
+            _state.update { s -> s.copy(tagging = s.tagging?.copy(people = people)) }
+        }
+    }
+
+    fun stopTagging() = _state.update { it.copy(tagging = null) }
+
+    fun tagBox(box: RectF) = _state.update { s -> s.copy(tagging = s.tagging?.copy(box = box, faceId = null, message = null)) }
+
+    fun tagFace(faceId: Long) = _state.update { s -> s.copy(tagging = s.tagging?.copy(faceId = faceId, box = null, message = null)) }
+
+    fun cancelPick() = _state.update { s -> s.copy(tagging = s.tagging?.copy(box = null, faceId = null)) }
+
+    /** Tags the drawn box or tapped face as [person], or as a new person named [newName]. */
+    fun tagAs(person: Person?, newName: String? = null) {
+        val tagging = _state.value.tagging ?: return
+        val photo = _state.value.selection?.photo ?: return
+        _state.update { it.copy(tagging = tagging.copy(saving = true)) }
+        viewModelScope.launch {
+            val message = withContext(Dispatchers.IO) {
+                try {
+                    val faceId = tagging.faceId
+                    val box = tagging.box
+                    val name = person?.name ?: newName?.trim()?.ifEmpty { null } ?: "an unnamed person"
+                    when {
+                        faceId != null -> {
+                            if (person != null) app.faces.move(listOf(faceId), person.id) else app.faces.newPerson(listOf(faceId), newName)
+                            "Tagged $name"
+                        }
+                        box != null -> {
+                            val recognised = ManualTagger.tag(getApplication(), photo, box, person?.id, newName)
+                            if (recognised) "Tagged $name · face recognised, it helps find more photos"
+                            else "Tagged $name · no face found in the box, saved as a tag only"
+                        }
+                        else -> null
+                    }
+                } catch (e: Exception) {
+                    "Could not tag: ${e.message ?: e}"
+                }
+            }
+            val people = withContext(Dispatchers.IO) { app.faces.people() }
+            _state.update { s ->
+                s.copy(tagging = s.tagging?.copy(people = people, box = null, faceId = null, saving = false, message = message))
+            }
+            loadFaces()
+        }
     }
 
     fun toggleFaceTags() {

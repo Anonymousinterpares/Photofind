@@ -15,7 +15,7 @@ import java.nio.ByteOrder
  * One row per photo on the device. A row with a NULL embedding is a photo that could not be
  * decoded or embedded; it is kept so it isn't retried until the file changes.
  */
-class PhotoStore(context: Context) : SQLiteOpenHelper(context, "photofind.db", null, 3) {
+class PhotoStore(context: Context) : SQLiteOpenHelper(context, "photofind.db", null, 4) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(

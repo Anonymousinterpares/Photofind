@@ -133,7 +133,7 @@ class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             NewFace(box, face.score, engine.embed(bitmap, face))
         }
         val ids = store.replace(photo.key, photo.signature, faces)
-        ids.zip(found).forEach { (id, face) ->
+        ids.zip(found).filter { (id, _) -> id >= 0 }.forEach { (id, face) ->
             val thumbnail = engine.thumbnail(bitmap, face.box)
             File(thumbnails, "$id.jpg").outputStream().use { thumbnail.compress(Bitmap.CompressFormat.JPEG, 85, it) }
             thumbnail.recycle()

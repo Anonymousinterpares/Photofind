@@ -8,11 +8,16 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material3.TextButton
+import android.graphics.RectF
+import com.photofind.data.Person
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import com.photofind.data.PhotoFace
 import kotlin.math.roundToInt
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -66,6 +71,12 @@ fun PhotoDetail(
     showTags: Boolean,
     onToggleTags: () -> Unit,
     onPerson: (Long?) -> Unit,
+    tagging: Tagging?,
+    onStartTagging: () -> Unit,
+    onTagBox: (RectF) -> Unit,
+    onTagFace: (Long) -> Unit,
+    onCancelPick: () -> Unit,
+    onTagAs: (Person?, String?) -> Unit,
     onClose: () -> Unit,
     onSimilar: () -> Unit,
     onOpen: () -> Unit,
@@ -89,11 +100,24 @@ fun PhotoDetail(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
                 Text(
-                    "Pinch or double-tap to zoom",
-                    color = Color.White.copy(alpha = 0.5f),
+                    when {
+                        tagging?.saving == true -> "Saving…"
+                        tagging?.message != null -> tagging.message
+                        tagging != null -> "Drag over a face to tag it, or tap a frame to change who it is"
+                        else -> "Pinch or double-tap to zoom"
+                    },
+                    color = Color.White.copy(alpha = if (tagging != null) 0.9f else 0.5f),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f),
+                    maxLines = 2,
                 )
+                if (tagging != null) {
+                    TextButton(onClick = onClose) { Text("Done") }
+                    return@Row
+                }
+                IconButton(onClick = onStartTagging) {
+                    Icon(Icons.Default.Add, contentDescription = "Tag a person", tint = Color.White)
+                }
                 if (faces.isNotEmpty()) {
                     IconButton(onClick = onToggleTags) {
                         Icon(
@@ -112,10 +136,15 @@ fun PhotoDetail(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
-                overlay = if (showTags) {
-                    { FaceTags(faces, onPerson) }
-                } else {
-                    null
+                gestures = tagging == null,
+                overlay = when {
+                    tagging != null -> {
+                        { TagLayer(faces, tagging.box, onTagBox, onTagFace) }
+                    }
+                    showTags -> {
+                        { FaceTags(faces, onPerson) }
+                    }
+                    else -> null
                 },
             )
             Column(
@@ -153,7 +182,119 @@ fun PhotoDetail(
             }
         }
     }
+
+    var naming by remember { mutableStateOf(false) }
+    if (tagging?.picking == true && !naming) {
+        PersonPicker(
+            title = "Who is this?",
+            people = tagging.people,
+            onDismiss = onCancelPick,
+            onNewPerson = { naming = true },
+        ) { onTagAs(it, null) }
+    }
+    if (naming) {
+        RenameDialog("", onDismiss = { naming = false }) {
+            naming = false
+            onTagAs(null, it)
+        }
+    }
 }
+
+/**
+ * Tag mode over the photo: the faces' frames, tappable to change who they are, and a box drawn
+ * by dragging, which [onBox] receives in 0..1 photo coordinates. [pending] is a drawn box
+ * waiting for a person.
+ */
+@Composable
+private fun TagLayer(faces: List<PhotoFace>, pending: RectF?, onBox: (RectF) -> Unit, onFace: (Long) -> Unit) {
+    var start by remember { mutableStateOf<Offset?>(null) }
+    var end by remember { mutableStateOf<Offset?>(null) }
+    val density = LocalDensity.current
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val width = constraints.maxWidth.toFloat()
+        val height = constraints.maxHeight.toFloat()
+
+        fun normalised(a: Offset, b: Offset) = RectF(
+            (minOf(a.x, b.x) / width).coerceIn(0f, 1f),
+            (minOf(a.y, b.y) / height).coerceIn(0f, 1f),
+            (maxOf(a.x, b.x) / width).coerceIn(0f, 1f),
+            (maxOf(a.y, b.y) / height).coerceIn(0f, 1f),
+        )
+
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(faces) {
+                    detectTapGestures { tap ->
+                        faces.lastOrNull {
+                            tap.x in it.box.left * width..it.box.right * width &&
+                                tap.y in it.box.top * height..it.box.bottom * height
+                        }?.let { onFace(it.id) }
+                    }
+                }
+                .pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragStart = {
+                            start = it
+                            end = it
+                        },
+                        onDrag = { change, _ -> end = change.position },
+                        onDragEnd = {
+                            val a = start
+                            val b = end
+                            start = null
+                            end = null
+                            if (a != null && b != null) {
+                                val box = normalised(a, b)
+                                // Ignore slips; a face is rarely under 2% of the photo.
+                                if (box.width() > 0.02f && box.height() > 0.02f) onBox(box)
+                            }
+                        },
+                        onDragCancel = {
+                            start = null
+                            end = null
+                        },
+                    )
+                },
+        )
+
+        @Composable
+        fun frame(box: RectF, color: Color, label: String?) = with(density) {
+            Box(
+                Modifier
+                    .offset { IntOffset((box.left * width).roundToInt(), (box.top * height).roundToInt()) }
+                    .size((box.width() * width).toDp(), (box.height() * height).toDp())
+                    .border(2.dp, color, RoundedCornerShape(4.dp)),
+            )
+            if (label != null) {
+                Text(
+                    label,
+                    color = Color.Black,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .offset { IntOffset((box.left * width).roundToInt(), (box.bottom * height).roundToInt() + 2) }
+                        .background(color, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                )
+            }
+        }
+
+        faces.forEach { face -> frame(face.box, tagColor(face), tagLabel(face)) }
+        pending?.let { frame(it, Color.White, null) }
+        val a = start
+        val b = end
+        if (a != null && b != null) frame(normalised(a, b), Color.White, null)
+    }
+}
+
+private fun tagColor(face: PhotoFace): Color = when {
+    face.name != null -> Color(0xFF4CAF50)
+    face.personId != null -> Color(0xFFFFB300)
+    else -> Color(0xFFBDBDBD)
+}
+
+private fun tagLabel(face: PhotoFace): String = face.name ?: if (face.personId != null) "Unnamed" else "Unknown"
 
 /** "Anna, Piotr · 1 unnamed · 2 unknown" */
 private fun peopleLine(faces: List<PhotoFace>): String {
@@ -179,11 +320,7 @@ private fun FaceTags(faces: List<PhotoFace>, onPerson: (Long?) -> Unit) {
         val width = constraints.maxWidth.toFloat()
         val height = constraints.maxHeight.toFloat()
         faces.forEach { face ->
-            val color = when {
-                face.name != null -> Color(0xFF4CAF50)
-                face.personId != null -> Color(0xFFFFB300)
-                else -> Color(0xFFBDBDBD)
-            }
+            val color = tagColor(face)
             val left = face.box.left * width
             val top = face.box.top * height
             val boxWidth = (face.box.right - face.box.left) * width
@@ -196,7 +333,7 @@ private fun FaceTags(faces: List<PhotoFace>, onPerson: (Long?) -> Unit) {
                         .border(2.dp, color, RoundedCornerShape(4.dp)),
                 )
                 Text(
-                    face.name ?: if (face.personId != null) "Unnamed" else "Unknown",
+                    tagLabel(face),
                     color = Color.Black,
                     style = MaterialTheme.typography.labelSmall,
                     maxLines = 1,
@@ -218,6 +355,8 @@ internal fun ZoomableImage(
     photo: com.photofind.search.IndexedPhoto,
     modifier: Modifier,
     overlay: (@Composable () -> Unit)? = null,
+    /** Pinch and double-tap zoom; off while the overlay takes the gestures (tagging). */
+    gestures: Boolean = true,
 ) {
     val context = LocalContext.current
     var scale by remember(photo.key) { mutableFloatStateOf(1f) }
@@ -235,7 +374,8 @@ internal fun ZoomableImage(
         modifier
             .clipToBounds()
             .onSizeChanged { size = it }
-            .pointerInput(photo.key) {
+            .pointerInput(photo.key, gestures) {
+                if (!gestures) return@pointerInput
                 detectTapGestures(
                     onDoubleTap = { tap ->
                         if (scale > 1f) {
@@ -249,7 +389,8 @@ internal fun ZoomableImage(
                     },
                 )
             }
-            .pointerInput(photo.key) {
+            .pointerInput(photo.key, gestures) {
+                if (!gestures) return@pointerInput
                 detectTransformGestures { centroid, pan, zoom, _ ->
                     val newScale = (scale * zoom).coerceIn(1f, MAX_ZOOM)
                     // Keep the point under the fingers in place while zooming.

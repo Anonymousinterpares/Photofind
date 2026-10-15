@@ -10,7 +10,10 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** A face found in a photo; [box] is in 0..1 photo coordinates. */
+/**
+ * A face found in a photo; [box] is in 0..1 photo coordinates. A face tagged by hand may have
+ * an empty [embedding] when no face could be found in the box (a back of a head, a blur).
+ */
 class NewFace(val box: RectF, val score: Float, val embedding: FloatArray)
 
 /** A stored face as clustering sees it. */
@@ -28,7 +31,7 @@ data class Person(val id: Long, val name: String?, val faceCount: Int, val cover
 data class PersonFace(val id: Long, val photo: IndexedPhoto)
 
 /** A face in one photo, for drawing tags over it; [personId] is null for a face nobody claims. */
-data class PhotoFace(val id: Long, val box: RectF, val personId: Long?, val name: String?)
+data class PhotoFace(val id: Long, val box: RectF, val personId: Long?, val name: String?, val manual: Boolean)
 
 /**
  * Faces, the people they belong to, and the user's corrections, in the photo database.
@@ -37,6 +40,7 @@ data class PhotoFace(val id: Long, val box: RectF, val personId: Long?, val name
  * kept as-is by later clustering, which only places faces that have no person. Removing a face
  * from a person records a rejection, so clustering never puts it back there. Hidden faces
  * (strangers, statues, posters) are left out of people, clustering and the unsorted faces.
+ * Faces tagged by hand are kept when the photo is scanned again.
  */
 class FaceStore(context: Context, private val photos: PhotoStore) {
 
@@ -59,26 +63,22 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
             arrayOf(key, signature),
         ).use { it.moveToFirst() }
 
-    /** Replaces the faces of one photo; returns the new faces' ids in order. */
+    /**
+     * Replaces the detected faces of one photo and returns the new faces' ids in order, -1 for a
+     * face skipped because the user already tagged it by hand.
+     */
     fun replace(key: String, signature: String, faces: List<NewFace>): List<Long> {
         val db = photos.writableDatabase
         db.beginTransaction()
         try {
-            deleteForPhoto(db, key)
+            db.execSQL(
+                "DELETE FROM face_rejections WHERE face_id IN (SELECT id FROM faces WHERE photo_key = ? AND manual = 0)",
+                arrayOf(key),
+            )
+            db.delete("faces", "photo_key = ? AND manual = 0", arrayOf(key))
+            val manual = facesIn(key).filter { it.manual }.map { it.box }
             val ids = faces.map { face ->
-                db.insertOrThrow(
-                    "faces",
-                    null,
-                    ContentValues().apply {
-                        put("photo_key", key)
-                        put("x0", face.box.left)
-                        put("y0", face.box.top)
-                        put("x1", face.box.right)
-                        put("y1", face.box.bottom)
-                        put("score", face.score)
-                        put("embedding", encode(face.embedding))
-                    },
-                )
+                if (manual.any { overlap(it, face.box) > 0.3f }) -1L else insert(db, key, face, manual = false)
             }
             db.insertWithOnConflict(
                 "face_scans",
@@ -96,13 +96,43 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
         }
     }
 
+    /** Adds a face the user tagged by hand; returns its id. */
+    fun addManual(key: String, face: NewFace): Long = insert(photos.writableDatabase, key, face, manual = true)
+
+    private fun insert(db: SQLiteDatabase, key: String, face: NewFace, manual: Boolean): Long =
+        db.insertOrThrow(
+            "faces",
+            null,
+            ContentValues().apply {
+                put("photo_key", key)
+                put("x0", face.box.left)
+                put("y0", face.box.top)
+                put("x1", face.box.right)
+                put("y1", face.box.bottom)
+                put("score", face.score)
+                put("embedding", encode(face.embedding))
+                put("manual", if (manual) 1 else 0)
+            },
+        )
+
+    private fun overlap(a: RectF, b: RectF): Float {
+        val w = minOf(a.right, b.right) - maxOf(a.left, b.left)
+        val h = minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)
+        if (w <= 0 || h <= 0) return 0f
+        val both = w * h
+        return both / (a.width() * a.height() + b.width() * b.height() - both)
+    }
+
     fun faceCount(): Int =
         photos.readableDatabase.rawQuery("SELECT COUNT(*) FROM faces", null)
             .use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
 
     fun allFaces(): List<StoredFace> {
         val out = ArrayList<StoredFace>()
-        photos.readableDatabase.rawQuery("SELECT id, person_id, embedding FROM faces WHERE hidden = 0", null).use { c ->
+        photos.readableDatabase.rawQuery(
+            "SELECT id, person_id, embedding FROM faces WHERE hidden = 0 AND length(embedding) > 0",
+            null,
+        ).use { c ->
             while (c.moveToNext()) {
                 out += StoredFace(c.getLong(0), if (c.isNull(1)) null else c.getLong(1), decode(c.getBlob(2)))
             }
@@ -177,7 +207,7 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
         val out = ArrayList<PhotoFace>()
         photos.readableDatabase.rawQuery(
             """
-            SELECT f.id, f.x0, f.y0, f.x1, f.y1, f.person_id, p.name
+            SELECT f.id, f.x0, f.y0, f.x1, f.y1, f.person_id, p.name, f.manual
             FROM faces f LEFT JOIN persons p ON p.id = f.person_id
             WHERE f.photo_key = ? AND f.hidden = 0
             ORDER BY f.x0
@@ -190,6 +220,7 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
                     box = RectF(c.getFloat(1), c.getFloat(2), c.getFloat(3), c.getFloat(4)),
                     personId = if (c.isNull(5)) null else c.getLong(5),
                     name = c.getString(6),
+                    manual = c.getInt(7) != 0,
                 )
             }
         }
@@ -335,7 +366,8 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
                     score REAL NOT NULL,
                     embedding BLOB NOT NULL,
                     person_id INTEGER,
-                    hidden INTEGER NOT NULL DEFAULT 0
+                    hidden INTEGER NOT NULL DEFAULT 0,
+                    manual INTEGER NOT NULL DEFAULT 0
                 )
                 """.trimIndent(),
             )
@@ -351,6 +383,7 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
         /** Brings face tables made by an older version (2 or later) up to date. */
         fun upgrade(db: SQLiteDatabase, oldVersion: Int) {
             if (oldVersion < 3) db.execSQL("ALTER TABLE faces ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+            if (oldVersion < 4) db.execSQL("ALTER TABLE faces ADD COLUMN manual INTEGER NOT NULL DEFAULT 0")
         }
 
         /** Forgets a photo's faces, e.g. when it was deleted or changed. */
