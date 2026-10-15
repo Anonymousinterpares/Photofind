@@ -61,4 +61,6 @@ dependencies {
     implementation("com.google.mediapipe:tasks-retrieval:1.1.0")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
+
+    testImplementation("junit:junit:4.13.2")
 }

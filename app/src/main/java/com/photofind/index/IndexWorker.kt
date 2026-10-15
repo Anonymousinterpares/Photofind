@@ -13,6 +13,8 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.photofind.faces.FaceEngine
+import com.photofind.faces.FaceWorker
 import com.photofind.photoFind
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -87,6 +89,8 @@ class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             }
         }
         app.search.invalidate()
+        // New or changed photos get their faces looked for next (a no-op when nothing changed).
+        if (!isStopped && FaceEngine(applicationContext).missingModels().isEmpty()) FaceWorker.start(applicationContext)
         return Result.success(
             workDataOf(KEY_DONE to done, KEY_TOTAL to todo.size, KEY_FAILED to failed),
         )

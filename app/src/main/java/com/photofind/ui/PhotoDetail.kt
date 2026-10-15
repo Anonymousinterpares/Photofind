@@ -1,6 +1,18 @@
 package com.photofind.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import com.photofind.data.PhotoFace
+import kotlin.math.roundToInt
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -50,6 +62,10 @@ private const val DOUBLE_TAP_ZOOM = 2.5f
 @Composable
 fun PhotoDetail(
     selection: Selection,
+    faces: List<PhotoFace>,
+    showTags: Boolean,
+    onToggleTags: () -> Unit,
+    onPerson: (Long?) -> Unit,
     onClose: () -> Unit,
     onSimilar: () -> Unit,
     onOpen: () -> Unit,
@@ -78,6 +94,15 @@ fun PhotoDetail(
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f),
                 )
+                if (faces.isNotEmpty()) {
+                    IconButton(onClick = onToggleTags) {
+                        Icon(
+                            Icons.Default.Person,
+                            contentDescription = if (showTags) "Hide people" else "Show people",
+                            tint = if (showTags) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.6f),
+                        )
+                    }
+                }
                 IconButton(onClick = onDelete) {
                     Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.White)
                 }
@@ -87,6 +112,11 @@ fun PhotoDetail(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
+                overlay = if (showTags) {
+                    { FaceTags(faces, onPerson) }
+                } else {
+                    null
+                },
             )
             Column(
                 Modifier.padding(16.dp),
@@ -98,6 +128,13 @@ fun PhotoDetail(
                     color = Color.White.copy(alpha = 0.7f),
                     style = MaterialTheme.typography.bodySmall,
                 )
+                if (faces.isNotEmpty()) {
+                    Text(
+                        peopleLine(faces),
+                        color = Color.White.copy(alpha = 0.85f),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 selection.score?.let {
                     Text(
                         "Match %.3f".format(it),
@@ -118,12 +155,75 @@ fun PhotoDetail(
     }
 }
 
+/** "Anna, Piotr · 1 unnamed · 2 unknown" */
+private fun peopleLine(faces: List<PhotoFace>): String {
+    val names = faces.mapNotNull { it.name }.distinct()
+    val unnamed = faces.count { it.personId != null && it.name == null }
+    val unknown = faces.count { it.personId == null }
+    return buildList {
+        if (names.isNotEmpty()) add(names.joinToString(", "))
+        if (unnamed > 0) add("$unnamed unnamed")
+        if (unknown > 0) add("$unknown unknown")
+    }.joinToString(" · ")
+}
+
+/**
+ * A frame and label on each face: green with the name when the person is named, amber for a
+ * person without a name yet, grey for a face that belongs to nobody. Tapping a label opens
+ * that person (or the unsorted faces). Drawn over the photo's own area.
+ */
 @Composable
-internal fun ZoomableImage(photo: com.photofind.search.IndexedPhoto, modifier: Modifier) {
+private fun FaceTags(faces: List<PhotoFace>, onPerson: (Long?) -> Unit) {
+    val density = LocalDensity.current
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val width = constraints.maxWidth.toFloat()
+        val height = constraints.maxHeight.toFloat()
+        faces.forEach { face ->
+            val color = when {
+                face.name != null -> Color(0xFF4CAF50)
+                face.personId != null -> Color(0xFFFFB300)
+                else -> Color(0xFFBDBDBD)
+            }
+            val left = face.box.left * width
+            val top = face.box.top * height
+            val boxWidth = (face.box.right - face.box.left) * width
+            val boxHeight = (face.box.bottom - face.box.top) * height
+            with(density) {
+                Box(
+                    Modifier
+                        .offset { IntOffset(left.roundToInt(), top.roundToInt()) }
+                        .size(boxWidth.toDp(), boxHeight.toDp())
+                        .border(2.dp, color, RoundedCornerShape(4.dp)),
+                )
+                Text(
+                    face.name ?: if (face.personId != null) "Unnamed" else "Unknown",
+                    color = Color.Black,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .offset { IntOffset(left.roundToInt(), (top + boxHeight).roundToInt() + 2) }
+                        .widthIn(max = maxOf(boxWidth.toDp(), 72.dp))
+                        .background(color, RoundedCornerShape(4.dp))
+                        .clickable { onPerson(face.personId) }
+                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                )
+            }
+        }
+    }
+}
+
+/** [overlay] is drawn over the photo's own area and zooms with it. */
+@Composable
+internal fun ZoomableImage(
+    photo: com.photofind.search.IndexedPhoto,
+    modifier: Modifier,
+    overlay: (@Composable () -> Unit)? = null,
+) {
     val context = LocalContext.current
     var scale by remember(photo.key) { mutableFloatStateOf(1f) }
     var offset by remember(photo.key) { mutableStateOf(Offset.Zero) }
     var size by remember { mutableStateOf(IntSize.Zero) }
+    var imageSize by remember(photo.key) { mutableStateOf<IntSize?>(null) }
 
     fun clamp(candidate: Offset, atScale: Float): Offset {
         val maxX = size.width * (atScale - 1f) / 2f
@@ -161,18 +261,34 @@ internal fun ZoomableImage(photo: com.photofind.search.IndexedPhoto, modifier: M
                 }
             },
     ) {
+        val zoom = Modifier.graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+            translationX = offset.x
+            translationY = offset.y
+        }
         AsyncImage(
             model = ImageRequest.Builder(context).data(photo.uri).size(2560).build(),
             contentDescription = null,
             contentScale = ContentScale.Fit,
+            onSuccess = { imageSize = IntSize(it.result.image.width, it.result.image.height) },
             modifier = Modifier
                 .fillMaxSize()
-                .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                    translationX = offset.x
-                    translationY = offset.y
-                },
+                .then(zoom),
         )
+        val image = imageSize
+        if (overlay != null && image != null && size.width > 0 && image.width > 0) {
+            // Where ContentScale.Fit puts the photo inside this box.
+            val fit = minOf(size.width.toFloat() / image.width, size.height.toFloat() / image.height)
+            val shown = IntSize((image.width * fit).roundToInt(), (image.height * fit).roundToInt())
+            val density = LocalDensity.current
+            Box(Modifier.fillMaxSize().then(zoom)) {
+                Box(
+                    Modifier
+                        .align(Alignment.Center)
+                        .size(with(density) { shown.width.toDp() }, with(density) { shown.height.toDp() }),
+                ) { overlay() }
+            }
+        }
     }
 }

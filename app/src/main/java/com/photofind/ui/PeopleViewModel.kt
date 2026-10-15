@@ -17,6 +17,30 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.Collator
+
+enum class PeopleSort(val label: String) {
+    MostPhotos("Most photos"),
+    FewestPhotos("Fewest photos"),
+    NameAscending("Name A–Z"),
+    NameDescending("Name Z–A"),
+    ;
+
+    /** Sorts [people]; by name, unnamed people come last, in order of photo count. */
+    fun sort(people: List<Person>): List<Person> {
+        val collator = Collator.getInstance()
+        val byCount = compareByDescending<Person> { it.faceCount }
+        return when (this) {
+            MostPhotos -> people.sortedWith(byCount)
+            FewestPhotos -> people.sortedBy { it.faceCount }
+            NameAscending, NameDescending -> {
+                val (named, unnamed) = people.partition { it.name != null }
+                val byName = Comparator<Person> { a, b -> collator.compare(a.name, b.name) }
+                named.sortedWith(if (this == NameAscending) byName else byName.reversed()) + unnamed.sortedWith(byCount)
+            }
+        }
+    }
+}
 
 /** One person opened; [selected] holds face ids (as strings, for the shared grid gestures). */
 data class PersonView(
@@ -32,10 +56,15 @@ data class PeopleState(
     val scanning: IndexProgress? = null,
     val scanMessage: String? = null,
     val people: List<Person> = emptyList(),
+    /** Faces nobody claims yet, shown as their own tile; null when there are none. */
+    val unsorted: Person? = null,
+    val sort: PeopleSort = PeopleSort.MostPhotos,
     val loaded: Boolean = false,
     val selectedPeople: Set<Long> = emptySet(),
     val person: PersonView? = null,
-)
+) {
+    val sortedPeople: List<Person> get() = sort.sort(people)
+}
 
 /** People found by face recognition: browsing them, naming, merging and correcting. */
 class PeopleViewModel(application: Application) : AndroidViewModel(application) {
@@ -67,6 +96,22 @@ class PeopleViewModel(application: Application) : AndroidViewModel(application) 
         reload()
         if (missing.isEmpty()) FaceWorker.start(getApplication())
     }
+
+    /** Opens a person straight from a photo; null opens the unsorted faces. */
+    fun openPerson(personId: Long?) {
+        open()
+        viewModelScope.launch {
+            val person = withContext(Dispatchers.IO) {
+                if (personId == null) app.faces.unsorted() else app.faces.people().firstOrNull { it.id == personId }
+            } ?: return@launch
+            openPerson(person)
+        }
+    }
+
+    /** Looks for faces in photos not scanned yet (new or changed ones). */
+    fun scanNow() = FaceWorker.start(getApplication())
+
+    fun setSort(sort: PeopleSort) = _state.update { it.copy(sort = sort) }
 
     fun close() = _state.update { it.copy(open = false, person = null, selectedPeople = emptySet()) }
 
@@ -124,6 +169,25 @@ class PeopleViewModel(application: Application) : AndroidViewModel(application) 
         s.copy(person = s.person?.let { view -> view.copy(selected = view.faces.mapTo(HashSet()) { it.id.toString() }) })
     }
 
+    /** Hides the selected faces everywhere (strangers, statues, posters). */
+    fun hideSelectedFaces() {
+        val ids = _state.value.person?.selected?.map { it.toLong() } ?: return
+        setFaceSelection(emptySet())
+        write { app.faces.hide(ids) }
+    }
+
+    /** Makes a new person of the selected faces and opens it. */
+    fun newPersonFromSelected(name: String) {
+        val ids = _state.value.person?.selected?.map { it.toLong() } ?: return
+        setFaceSelection(emptySet())
+        viewModelScope.launch {
+            val id = withContext(Dispatchers.IO) { app.faces.newPerson(ids, name) }
+            reload()
+            val person = withContext(Dispatchers.IO) { app.faces.people().firstOrNull { it.id == id } }
+            if (person != null) openPerson(person)
+        }
+    }
+
     /** "Not this person": takes the selected faces out and keeps them out. */
     fun removeSelectedFaces() {
         val view = _state.value.person ?: return
@@ -160,16 +224,18 @@ class PeopleViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun reload() {
         viewModelScope.launch {
-            val people = withContext(Dispatchers.IO) { app.faces.people() }
+            val (people, unsorted) = withContext(Dispatchers.IO) { app.faces.people() to app.faces.unsorted() }
             _state.update { s ->
                 val ids = people.mapTo(HashSet()) { it.id }
                 s.copy(
                     people = people,
+                    unsorted = unsorted,
                     loaded = true,
                     selectedPeople = s.selectedPeople.filterTo(HashSet()) { it in ids },
                     // The open person was merged away or emptied: leave it.
                     person = s.person?.let { view ->
-                        people.firstOrNull { it.id == view.person.id }?.let { view.copy(person = it) }
+                        val current = if (view.person.unsorted) unsorted else people.firstOrNull { it.id == view.person.id }
+                        current?.let { view.copy(person = it) }
                     },
                 )
             }

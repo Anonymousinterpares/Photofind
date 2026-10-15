@@ -16,16 +16,27 @@ class NewFace(val box: RectF, val score: Float, val embedding: FloatArray)
 /** A stored face as clustering sees it. */
 class StoredFace(val id: Long, val personId: Long?, val embedding: FloatArray)
 
-data class Person(val id: Long, val name: String?, val faceCount: Int, val coverFaceId: Long)
+data class Person(val id: Long, val name: String?, val faceCount: Int, val coverFaceId: Long) {
+    val unsorted: Boolean get() = id == UNSORTED
+
+    companion object {
+        /** Stands for the faces that belong to nobody yet, shown like a person. */
+        const val UNSORTED = -1L
+    }
+}
 
 data class PersonFace(val id: Long, val photo: IndexedPhoto)
+
+/** A face in one photo, for drawing tags over it; [personId] is null for a face nobody claims. */
+data class PhotoFace(val id: Long, val box: RectF, val personId: Long?, val name: String?)
 
 /**
  * Faces, the people they belong to, and the user's corrections, in the photo database.
  *
  * A face's person is either a guess (clustering) or the user's doing (merge, move); both are
  * kept as-is by later clustering, which only places faces that have no person. Removing a face
- * from a person records a rejection, so clustering never puts it back there.
+ * from a person records a rejection, so clustering never puts it back there. Hidden faces
+ * (strangers, statues, posters) are left out of people, clustering and the unsorted faces.
  */
 class FaceStore(context: Context, private val photos: PhotoStore) {
 
@@ -91,7 +102,7 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
 
     fun allFaces(): List<StoredFace> {
         val out = ArrayList<StoredFace>()
-        photos.readableDatabase.rawQuery("SELECT id, person_id, embedding FROM faces", null).use { c ->
+        photos.readableDatabase.rawQuery("SELECT id, person_id, embedding FROM faces WHERE hidden = 0", null).use { c ->
             while (c.moveToNext()) {
                 out += StoredFace(c.getLong(0), if (c.isNull(1)) null else c.getLong(1), decode(c.getBlob(2)))
             }
@@ -127,22 +138,73 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
         return out
     }
 
-    /** One person's faces with their photos, newest first. */
+    /** The faces nobody claims yet, as a [Person] with id [Person.UNSORTED]; null when there are none. */
+    fun unsorted(): Person? =
+        photos.readableDatabase.rawQuery(
+            """
+            SELECT COUNT(*), (SELECT id FROM faces WHERE person_id IS NULL AND hidden = 0
+                ORDER BY score * (x1 - x0) DESC LIMIT 1)
+            FROM faces WHERE person_id IS NULL AND hidden = 0
+            """.trimIndent(),
+            null,
+        ).use { c ->
+            if (c.moveToFirst() && c.getInt(0) > 0) Person(Person.UNSORTED, null, c.getInt(0), c.getLong(1)) else null
+        }
+
+    /** One person's faces (or the unsorted ones) with their photos, newest first. */
     fun facesOf(personId: Long): List<PersonFace> {
         val out = ArrayList<PersonFace>()
+        val where = if (personId == Person.UNSORTED) "f.person_id IS NULL AND f.hidden = 0" else "f.person_id = ?"
         photos.readableDatabase.rawQuery(
             """
             SELECT f.id, p.key, p.uri, p.date_taken, p.signature
             FROM faces f JOIN photos p ON p.key = f.photo_key
-            WHERE f.person_id = ?
+            WHERE $where
             ORDER BY p.date_taken DESC
             """.trimIndent(),
-            arrayOf(personId.toString()),
+            if (personId == Person.UNSORTED) null else arrayOf(personId.toString()),
         ).use { c ->
             while (c.moveToNext()) {
                 val size = c.getString(4).substringAfter(':').toLongOrNull() ?: 0L
                 out += PersonFace(c.getLong(0), IndexedPhoto(c.getString(1), Uri.parse(c.getString(2)), c.getLong(3), size))
             }
+        }
+        return out
+    }
+
+    /** The faces in one photo, left to right, with the names of the people they belong to. */
+    fun facesIn(photoKey: String): List<PhotoFace> {
+        val out = ArrayList<PhotoFace>()
+        photos.readableDatabase.rawQuery(
+            """
+            SELECT f.id, f.x0, f.y0, f.x1, f.y1, f.person_id, p.name
+            FROM faces f LEFT JOIN persons p ON p.id = f.person_id
+            WHERE f.photo_key = ? AND f.hidden = 0
+            ORDER BY f.x0
+            """.trimIndent(),
+            arrayOf(photoKey),
+        ).use { c ->
+            while (c.moveToNext()) {
+                out += PhotoFace(
+                    id = c.getLong(0),
+                    box = RectF(c.getFloat(1), c.getFloat(2), c.getFloat(3), c.getFloat(4)),
+                    personId = if (c.isNull(5)) null else c.getLong(5),
+                    name = c.getString(6),
+                )
+            }
+        }
+        return out
+    }
+
+    /** Keys of the photos in which any of [personIds] appears. */
+    fun photosOf(personIds: Collection<Long>): Set<String> {
+        if (personIds.isEmpty()) return emptySet()
+        val out = HashSet<String>()
+        photos.readableDatabase.rawQuery(
+            "SELECT DISTINCT photo_key FROM faces WHERE person_id IN (${personIds.joinToString { "?" }}) AND hidden = 0",
+            personIds.map { it.toString() }.toTypedArray(),
+        ).use { c ->
+            while (c.moveToNext()) out += c.getString(0)
         }
         return out
     }
@@ -196,9 +258,26 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
     /** Moves faces to another person, by the user's choice. */
     fun move(faceIds: Collection<Long>, to: Long) = transaction { db ->
         faceIds.forEach { id ->
-            db.execSQL("UPDATE faces SET person_id = ? WHERE id = ?", arrayOf(to, id))
+            db.execSQL("UPDATE faces SET person_id = ?, hidden = 0 WHERE id = ?", arrayOf(to, id))
             db.execSQL("DELETE FROM face_rejections WHERE face_id = ? AND person_id = ?", arrayOf(id, to))
         }
+        deleteEmptyPeople(db)
+    }
+
+    /** Makes a new person of [faceIds], optionally named; returns its id. */
+    fun newPerson(faceIds: Collection<Long>, name: String?): Long {
+        var id = 0L
+        transaction { db ->
+            id = db.insertOrThrow("persons", null, ContentValues().apply { put("name", name?.trim()?.ifEmpty { null }) })
+            faceIds.forEach { db.execSQL("UPDATE faces SET person_id = ?, hidden = 0 WHERE id = ?", arrayOf(id, it)) }
+            deleteEmptyPeople(db)
+        }
+        return id
+    }
+
+    /** Hides faces that aren't anyone to keep (strangers, statues, posters) from people and unsorted faces. */
+    fun hide(faceIds: Collection<Long>) = transaction { db ->
+        faceIds.forEach { db.execSQL("UPDATE faces SET person_id = NULL, hidden = 1 WHERE id = ?", arrayOf(it)) }
         deleteEmptyPeople(db)
     }
 
@@ -255,7 +334,8 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
                     y1 REAL NOT NULL,
                     score REAL NOT NULL,
                     embedding BLOB NOT NULL,
-                    person_id INTEGER
+                    person_id INTEGER,
+                    hidden INTEGER NOT NULL DEFAULT 0
                 )
                 """.trimIndent(),
             )
@@ -266,6 +346,11 @@ class FaceStore(context: Context, private val photos: PhotoStore) {
                 "CREATE TABLE face_rejections (face_id INTEGER NOT NULL, person_id INTEGER NOT NULL, " +
                     "PRIMARY KEY (face_id, person_id))",
             )
+        }
+
+        /** Brings face tables made by an older version (2 or later) up to date. */
+        fun upgrade(db: SQLiteDatabase, oldVersion: Int) {
+            if (oldVersion < 3) db.execSQL("ALTER TABLE faces ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
         }
 
         /** Forgets a photo's faces, e.g. when it was deleted or changed. */

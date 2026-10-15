@@ -1,18 +1,22 @@
 package com.photofind.ui
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.photofind.data.PhotoFace
 import com.photofind.index.IndexWorker
 import com.photofind.photoFind
 import com.photofind.search.DateRange
 import com.photofind.search.Hit
 import com.photofind.search.IndexedPhoto
+import com.photofind.search.PeopleQuery
 import com.photofind.search.PhotoGroup
+import com.photofind.search.parsePeopleQuery
 import com.photofind.search.SearchResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,8 +59,8 @@ data class DuplicatesView(
     val groups: List<PhotoGroup>? = null,
 )
 
-/** A photo opened full screen; [score] is set when it came from a search. */
-data class Selection(val photo: IndexedPhoto, val score: Float?)
+/** A photo opened full screen; [score] is set when it came from a search; [faces] once loaded. */
+data class Selection(val photo: IndexedPhoto, val score: Float?, val faces: List<PhotoFace> = emptyList())
 
 /** [trash] goes to the system trash; [permanent] (hidden folders) can only be deleted outright. */
 data class DeletePlan(val trash: List<IndexedPhoto>, val permanent: List<IndexedPhoto>) {
@@ -98,6 +102,8 @@ data class UiState(
     val trashRequest: List<Uri>? = null,
     val notice: String? = null,
     val duplicates: DuplicatesView? = null,
+    /** Name tags over faces in the full-screen photo; remembered between runs. */
+    val showFaceTags: Boolean = true,
 ) {
     val selecting: Boolean get() = selectedKeys.isNotEmpty()
 
@@ -119,7 +125,8 @@ data class UiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = application.photoFind
-    private val _state = MutableStateFlow(UiState())
+    private val prefs = application.getSharedPreferences("photofind", Context.MODE_PRIVATE)
+    private val _state = MutableStateFlow(UiState(showFaceTags = prefs.getBoolean(PREF_FACE_TAGS, true)))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private val history = ArrayDeque<View>()
@@ -178,6 +185,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun open(photo: IndexedPhoto, score: Float?) {
         pushHistory()
         _state.update { it.copy(selection = Selection(photo, score)) }
+        loadFaces()
+    }
+
+    fun toggleFaceTags() {
+        val show = !_state.value.showFaceTags
+        prefs.edit().putBoolean(PREF_FACE_TAGS, show).apply()
+        _state.update { it.copy(showFaceTags = show) }
+    }
+
+    /** (Re)loads the faces of the open photo, e.g. after people were renamed. */
+    fun loadFaces() {
+        val key = _state.value.selection?.photo?.key ?: return
+        viewModelScope.launch {
+            val faces = withContext(Dispatchers.IO) { app.faces.facesIn(key) }
+            _state.update { s ->
+                s.copy(selection = s.selection?.takeIf { it.photo.key == key }?.copy(faces = faces) ?: s.selection)
+            }
+        }
     }
 
     /** Undoes one step: clears a selection first, then walks back through the history. */
@@ -396,16 +421,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(searching = true, activeSearch = search, searchMessage = null) }
             val range = _state.value.dateRange
             val message = try {
-                val result: SearchResult = when (search) {
-                    is ActiveSearch.Text -> app.search.searchText(search.query, range)
-                    is ActiveSearch.Similar -> app.search.similarTo(search.photo.key, range)
+                val people = if (search is ActiveSearch.Text) peopleIn(search.query) else null
+                val result: SearchResult = when {
+                    search is ActiveSearch.Similar -> app.search.similarTo(search.photo.key, range)
+                    people == null -> app.search.searchText((search as ActiveSearch.Text).query, range)
+                    people.query.rest.isBlank() -> app.search.photos(people.photoKeys, range)
+                    else -> app.search.searchText(people.query.rest, range, only = people.photoKeys)
                 }
                 _state.update {
                     it.copy(results = result.hits, resultsScroll = 0, scrollRequest = it.scrollRequest + 1)
                 }
+                val names = people?.query?.names?.joinToString(" & ")
                 when {
-                    result.hits.isEmpty() -> "No photos match"
+                    result.hits.isEmpty() -> if (names != null) "No photos of $names match" else "No photos match"
                     search is ActiveSearch.Similar -> "${result.hits.size} similar photos"
+                    people != null && people.query.rest.isBlank() -> "${result.hits.size} photos of $names"
+                    people != null -> "${result.hits.size} best matches with $names"
                     else -> "${result.hits.size} best matches · ${result.embedMillis + result.rankMillis} ms"
                 }
             } catch (e: Exception) {
@@ -413,6 +444,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             _state.update { it.copy(searching = false, searchMessage = message) }
         }
+    }
+
+    private class PeopleSearch(val query: PeopleQuery, val photoKeys: Set<String>)
+
+    /** The named people a search mentions and the photos showing all of them; null if it names nobody. */
+    private suspend fun peopleIn(query: String): PeopleSearch? = withContext(Dispatchers.IO) {
+        val named = app.faces.people().filter { it.name != null }
+        val parsed = parsePeopleQuery(query, named)
+        if (parsed.people.isEmpty()) return@withContext null
+        // Photos showing every name; a name shared by several (unmerged) people means any of them.
+        val keys = parsed.people.map { sameName -> app.faces.photosOf(sameName.map { it.id }) }
+            .reduce { all, next -> all intersect next }
+        PeopleSearch(parsed, keys)
     }
 
     private fun onWork(infos: List<WorkInfo>) {
@@ -462,5 +506,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val MAX_HISTORY = 50
+        private const val PREF_FACE_TAGS = "face_tags"
     }
 }

@@ -63,6 +63,7 @@ import com.photofind.data.Person
 import com.photofind.data.PersonFace
 import com.photofind.photoFind
 import com.photofind.search.IndexedPhoto
+import com.photofind.search.foldName
 import java.text.NumberFormat
 
 /** People found in the photos; a person opens their faces, where wrong ones can be taken out. */
@@ -107,6 +108,23 @@ fun PeopleScreen(state: PeopleState, viewModel: PeopleViewModel) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
                         Text("People", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        SortMenu(state.sort, viewModel::setSort)
+                        var menu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { menu = true }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "More")
+                            }
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Scan for new faces") },
+                                    enabled = state.scanning == null && state.missingModels.isEmpty(),
+                                    onClick = {
+                                        menu = false
+                                        viewModel.scanNow()
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
                 ScanStatus(state)
@@ -129,7 +147,7 @@ fun PeopleScreen(state: PeopleState, viewModel: PeopleViewModel) {
                         )
                     }
                 }
-                state.loaded && state.people.isEmpty() -> Text(
+                state.loaded && state.people.isEmpty() && state.unsorted == null -> Text(
                     if (state.scanning != null) "People appear here as faces are found…" else "No people found",
                     modifier = Modifier
                         .align(Alignment.Center)
@@ -171,7 +189,25 @@ private fun PeopleGrid(state: PeopleState, viewModel: PeopleViewModel) {
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        items(state.people, key = { it.id }) { person ->
+        state.unsorted?.let { unsorted ->
+            item(key = "unsorted") {
+                Column(
+                    Modifier
+                        .clickable(enabled = !selecting) { viewModel.openPerson(unsorted) }
+                        .padding(6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        FaceImage(unsorted.coverFaceId, Modifier.size(88.dp).clip(CircleShape))
+                        Box(Modifier.size(88.dp).background(Color.Black.copy(alpha = 0.45f), CircleShape))
+                        Text("?", color = Color.White, style = MaterialTheme.typography.headlineMedium)
+                    }
+                    Text("Unsorted faces", style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                    Text("${unsorted.faceCount} faces", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+        items(state.sortedPeople, key = { it.id }) { person ->
             Column(
                 Modifier
                     .combinedClickable(
@@ -243,10 +279,24 @@ private fun PersonScreen(state: PeopleState, view: PersonView, viewModel: People
                     )
                     TextButton(onClick = viewModel::selectAllFaces) { Text("All") }
                     TextButton(onClick = { picking = PickPurpose.Move }) { Text("Move") }
-                    TextButton(onClick = viewModel::removeSelectedFaces) { Text("Not them") }
+                    if (view.person.unsorted) {
+                        TextButton(onClick = viewModel::hideSelectedFaces) { Text("Hide") }
+                    } else {
+                        TextButton(onClick = viewModel::removeSelectedFaces) { Text("Not them") }
+                    }
                 } else {
                     IconButton(onClick = viewModel::back) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                    if (view.person.unsorted) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Unsorted faces", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "${view.faces.size} faces · select to move or hide",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        return@Row
                     }
                     Column(
                         Modifier
@@ -315,14 +365,29 @@ private fun PersonScreen(state: PeopleState, view: PersonView, viewModel: People
             renaming = false
         }
     }
+    var naming by remember { mutableStateOf(false) }
     picking?.let { purpose ->
         PersonPicker(
             title = if (purpose == PickPurpose.Merge) "Same person as" else "Move ${view.selected.size} to",
             people = state.people.filter { it.id != view.person.id },
             onDismiss = { picking = null },
+            onNewPerson = if (purpose == PickPurpose.Move) {
+                {
+                    picking = null
+                    naming = true
+                }
+            } else {
+                null
+            },
         ) { other ->
             picking = null
             if (purpose == PickPurpose.Merge) viewModel.mergeInto(other) else viewModel.moveSelectedFaces(other)
+        }
+    }
+    if (naming) {
+        RenameDialog("", onDismiss = { naming = false }) {
+            viewModel.newPersonFromSelected(it)
+            naming = false
         }
     }
     preview?.let { photo -> PhotoPreview(photo) { preview = null } }
@@ -394,13 +459,87 @@ private fun RenameDialog(current: String, onDismiss: () -> Unit, onSave: (String
 }
 
 @Composable
-private fun PersonPicker(title: String, people: List<Person>, onDismiss: () -> Unit, onPick: (Person) -> Unit) {
+private fun SortMenu(sort: PeopleSort, onSort: (PeopleSort) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { open = true }) { Text(sort.label) }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            PeopleSort.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.label) },
+                    onClick = {
+                        open = false
+                        onSort(option)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Picks a person: searchable by name and sortable; [onNewPerson], when given, adds a
+ * "New person" choice at the top.
+ */
+@Composable
+private fun PersonPicker(
+    title: String,
+    people: List<Person>,
+    onDismiss: () -> Unit,
+    onNewPerson: (() -> Unit)? = null,
+    onPick: (Person) -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    var sort by remember { mutableStateOf(PeopleSort.NameAscending) }
+    val shown = remember(people, query, sort) {
+        val needle = foldName(query.trim())
+        sort.sort(people).filter { needle.isEmpty() || (it.name != null && needle in foldName(it.name)) }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                items(people, key = { it.id }) { person ->
+            Column {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    placeholder = { Text("Search by name") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${shown.size} people",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    SortMenu(sort) { sort = it }
+                }
+                LazyColumn(Modifier.heightIn(max = 380.dp)) {
+                    if (onNewPerson != null) {
+                        item(key = "new") {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable(onClick = onNewPerson)
+                                    .padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(44.dp)
+                                        .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                                    contentAlignment = Alignment.Center,
+                                ) { Text("+", style = MaterialTheme.typography.titleLarge) }
+                                Text(
+                                    "New person…",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier.padding(start = 12.dp),
+                                )
+                            }
+                        }
+                    }
+                    items(shown, key = { it.id }) { person ->
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -415,6 +554,7 @@ private fun PersonPicker(title: String, people: List<Person>, onDismiss: () -> U
                         }
                     }
                 }
+            }
             }
         },
         confirmButton = {},

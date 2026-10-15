@@ -45,11 +45,25 @@ class SearchEngine(private val store: PhotoStore, private val embedder: Embedder
     /** Every searchable photo, newest first. */
     suspend fun library(): List<IndexedPhoto> = snapshot().photos
 
-    suspend fun searchText(query: String, range: DateRange?, limit: Int = DEFAULT_LIMIT): SearchResult {
+    /** Best matches for [query]; [only], when given, limits them to those photos (e.g. of certain people). */
+    suspend fun searchText(
+        query: String,
+        range: DateRange?,
+        only: Set<String>? = null,
+        limit: Int = DEFAULT_LIMIT,
+    ): SearchResult {
         val embedStart = System.nanoTime()
         val vector = embedder.embedText(Embedder.QUERY_PREFIX + query)
         val embedMillis = (System.nanoTime() - embedStart) / 1_000_000
-        return rank(vector, excludeKey = null, range = range, limit = limit, embedMillis = embedMillis)
+        return rank(vector, excludeKey = null, range = range, limit = limit, embedMillis = embedMillis, only = only)
+    }
+
+    /** Every photo among [keys], newest first, e.g. all photos of a person. */
+    suspend fun photos(keys: Set<String>, range: DateRange?): SearchResult {
+        val hits = snapshot().photos
+            .filter { it.key in keys && (range == null || it.dateTaken in range) }
+            .map { Hit(it, 1f) }
+        return SearchResult(hits, 0, 0)
     }
 
     suspend fun similarTo(key: String, range: DateRange?, limit: Int = DEFAULT_LIMIT): SearchResult {
@@ -80,6 +94,7 @@ class SearchEngine(private val store: PhotoStore, private val embedder: Embedder
         range: DateRange?,
         limit: Int,
         embedMillis: Long,
+        only: Set<String>? = null,
     ): SearchResult {
         val current = snapshot()
         return withContext(Dispatchers.Default) {
@@ -94,7 +109,8 @@ class SearchEngine(private val store: PhotoStore, private val embedder: Embedder
             val hits = current.photos.indices
                 .filter { i ->
                     val photo = current.photos[i]
-                    photo.key != excludeKey && (range == null || photo.dateTaken in range)
+                    photo.key != excludeKey && (range == null || photo.dateTaken in range) &&
+                        (only == null || photo.key in only)
                 }
                 .sortedByDescending { scores[it] }
                 .take(limit)

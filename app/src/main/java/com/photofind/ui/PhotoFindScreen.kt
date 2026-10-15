@@ -122,6 +122,8 @@ fun PhotoFindScreen(
     }
 
     val people by peopleViewModel.state.collectAsStateWithLifecycle()
+    // Names may have changed while People was open.
+    LaunchedEffect(people.open) { if (!people.open) viewModel.loadFaces() }
     if (people.open) {
         PeopleScreen(people, peopleViewModel)
         return
@@ -200,6 +202,10 @@ fun PhotoFindScreen(
     state.selection?.let { selection ->
         PhotoDetail(
             selection = selection,
+            faces = selection.faces,
+            showTags = state.showFaceTags,
+            onToggleTags = viewModel::toggleFaceTags,
+            onPerson = peopleViewModel::openPerson,
             onClose = viewModel::back,
             onSimilar = { viewModel.findSimilar(selection.photo) },
             onOpen = { onOpenPhoto(selection.photo.uri) },
@@ -218,7 +224,7 @@ private fun SearchField(state: UiState, viewModel: MainViewModel) {
         value = state.query,
         onValueChange = viewModel::onQueryChange,
         modifier = Modifier.fillMaxWidth(),
-        placeholder = { Text("Describe the photo… / Opisz zdjęcie…") },
+        placeholder = { Text("Describe a photo or name people…") },
         singleLine = true,
         leadingIcon = {
             if (state.canGoBack) {

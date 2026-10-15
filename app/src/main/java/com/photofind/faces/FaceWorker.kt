@@ -41,7 +41,7 @@ class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         if (missing.isNotEmpty()) {
             return Result.failure(workDataOf(KEY_ERROR to "Face models missing: ${missing.joinToString()}"))
         }
-        setForeground(foregroundInfo(0, 0))
+        showProgress(0, 0)
 
         val store = app.faces
         val todo = withContext(Dispatchers.IO) {
@@ -80,7 +80,7 @@ class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                     done++
                     if (done % PROGRESS_EVERY == 0 || done == todo.size) {
                         setProgress(workDataOf(KEY_DONE to done, KEY_TOTAL to todo.size, KEY_GROUPINGS to groupings))
-                        setForeground(foregroundInfo(done, todo.size))
+                        showProgress(done, todo.size)
                     }
                     if (done % CLUSTER_EVERY == 0) {
                         withContext(Dispatchers.Default) { clusterFaces(store) }
@@ -98,6 +98,22 @@ class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         }
         return Result.success(workDataOf(KEY_DONE to done, KEY_TOTAL to todo.size, KEY_FACES to faces))
     }
+
+    /**
+     * Shows the progress notification. Started from the background (after indexing), Android
+     * may refuse a foreground service; the scan then just runs as ordinary background work.
+     */
+    private suspend fun showProgress(done: Int, total: Int) {
+        if (!foregroundAllowed) return
+        try {
+            setForeground(foregroundInfo(done, total))
+        } catch (e: IllegalStateException) {
+            Log.i(TAG, "Scanning without a notification", e)
+            foregroundAllowed = false
+        }
+    }
+
+    private var foregroundAllowed = true
 
     /** Finds, embeds and stores the faces of one photo; returns how many were kept. */
     private fun scan(engine: FaceEngine, photo: PhotoFile, bitmap: Bitmap?, thumbnails: File): Int {
