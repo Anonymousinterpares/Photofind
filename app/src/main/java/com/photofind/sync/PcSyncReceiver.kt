@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Environment
 import android.util.Log
 import androidx.work.WorkManager
+import com.photofind.faces.FaceWorker
 import com.photofind.index.IndexWorker
 import com.photofind.index.PhotoFile
 import com.photofind.index.PhotoScanner
@@ -25,7 +26,8 @@ import java.util.Base64
  * broadcasts (the receiver requires the DUMP permission, which ordinary apps can't hold).
  *
  * EXPORT pauses on-device indexing and writes the photos still to be indexed to [MANIFEST];
- * IMPORT stores one batch of PC-made embeddings; RESUME restarts on-device indexing.
+ * IMPORT stores one batch of PC-made embeddings; RESUME restarts on-device indexing;
+ * PAUSE stops it without handing the work to the PC.
  * Both files are tab separated: key, uri, date taken, modified, size (+ base64 vector for IMPORT).
  */
 class PcSyncReceiver : BroadcastReceiver() {
@@ -36,11 +38,20 @@ class PcSyncReceiver : BroadcastReceiver() {
         scope.launch {
             try {
                 when (intent.action) {
-                    ACTION_EXPORT -> export(context)
+                    ACTION_EXPORT -> {
+                        pauseWorkers(context)
+                        SyncStatus.write(context, "pc", 0, 0)
+                        export(context)
+                    }
                     ACTION_IMPORT -> import(context, requireNotNull(intent.getStringExtra(EXTRA_FILE)))
                     ACTION_RESUME -> {
                         app.search.invalidate()
+                        SyncStatus.write(context, "indexing", 0, 0)
                         IndexWorker.start(context)
+                    }
+                    ACTION_PAUSE -> {
+                        pauseWorkers(context)
+                        SyncStatus.write(context, "paused", 0, 0)
                     }
                 }
             } catch (e: Exception) {
@@ -52,8 +63,13 @@ class PcSyncReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun pauseWorkers(context: Context) {
+        val work = WorkManager.getInstance(context)
+        work.cancelUniqueWork(IndexWorker.WORK_NAME)
+        work.cancelUniqueWork(FaceWorker.WORK_NAME)
+    }
+
     private fun export(context: Context) {
-        WorkManager.getInstance(context).cancelUniqueWork(IndexWorker.WORK_NAME)
         val known = context.photoFind.store.signatures()
         val todo = PhotoScanner.scan(context)
             .filter { it.key.startsWith("/") && known[it.key] != it.signature }
@@ -106,6 +122,7 @@ class PcSyncReceiver : BroadcastReceiver() {
         const val ACTION_EXPORT = "com.photofind.EXPORT"
         const val ACTION_IMPORT = "com.photofind.IMPORT"
         const val ACTION_RESUME = "com.photofind.RESUME"
+        const val ACTION_PAUSE = "com.photofind.PAUSE"
         const val EXTRA_FILE = "file"
         const val MANIFEST = "manifest.tsv"
 

@@ -51,6 +51,7 @@
                 <action android:name="com.photofind.EXPORT" />
                 <action android:name="com.photofind.IMPORT" />
                 <action android:name="com.photofind.RESUME" />
+                <action android:name="com.photofind.PAUSE" />
             </intent-filter>
         </receiver>
 

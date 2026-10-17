@@ -16,6 +16,7 @@ import androidx.work.workDataOf
 import com.photofind.faces.FaceEngine
 import com.photofind.faces.FaceWorker
 import com.photofind.photoFind
+import com.photofind.sync.SyncStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -53,6 +54,7 @@ class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         var failed = 0
         var waitNanos = 0L
         var embedNanos = 0L
+        SyncStatus.write(applicationContext, "indexing", 0, todo.size)
         coroutineScope {
             // Null when the PC has imported this photo since the run started.
             fun decodeAsync(photo: PhotoFile) = async(Dispatchers.IO) {
@@ -64,6 +66,7 @@ class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             for ((index, photo) in todo.withIndex()) {
                 if (isStopped) {
                     next?.cancel()
+                    SyncStatus.write(applicationContext, "paused", done, todo.size)
                     break
                 }
                 val waitStart = System.nanoTime()
@@ -108,6 +111,7 @@ class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         withContext(Dispatchers.IO) { app.store.put(photo, vector) }
         if (done % PROGRESS_EVERY == 0 || done == total) {
             setProgress(workDataOf(KEY_DONE to done, KEY_TOTAL to total))
+            SyncStatus.write(applicationContext, "indexing", done, total)
             setForeground(foregroundInfo(done, total))
             Log.i(
                 TAG,

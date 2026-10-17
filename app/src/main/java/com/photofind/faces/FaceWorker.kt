@@ -19,6 +19,7 @@ import com.photofind.data.NewFace
 import com.photofind.index.PhotoFile
 import com.photofind.index.decodeForEmbedding
 import com.photofind.photoFind
+import com.photofind.sync.SyncStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -62,6 +63,7 @@ class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                 for ((index, photo) in todo.withIndex()) {
                     if (isStopped) {
                         next?.cancel()
+                        SyncStatus.write(applicationContext, "paused", done, todo.size)
                         break
                     }
                     val decoded = checkNotNull(next).await()
@@ -104,6 +106,7 @@ class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
      * may refuse a foreground service; the scan then just runs as ordinary background work.
      */
     private suspend fun showProgress(done: Int, total: Int) {
+        SyncStatus.write(applicationContext, "faces", done, total)
         if (!foregroundAllowed) return
         try {
             setForeground(foregroundInfo(done, total))

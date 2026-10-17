@@ -11,3 +11,5 @@ captures/
 models/
 .venv/
 __pycache__/
+tools/dist/
+tools/platform-tools/

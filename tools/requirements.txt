@@ -1,0 +1,4 @@
+litert-lm==0.18.0
+numpy==2.5.4
+pillow==12.3.0
+pillow_heif==1.8.1
