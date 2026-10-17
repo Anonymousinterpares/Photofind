@@ -202,8 +202,17 @@ fun PhotoFindScreen(
     }
 
     state.selection?.let { selection ->
+        // Same order as the thumbnails: the library grid is this list, and results follow the chosen sort.
+        val pages = remember(state.activeSearch, state.sort, state.dateRange, state.library, state.results) {
+            if (state.activeSearch == null) {
+                state.libraryInRange.map { DetailPage(it, null) }
+            } else {
+                state.sortedResults.map { DetailPage(it.photo, it.score) }
+            }
+        }
         PhotoDetail(
             selection = selection,
+            pages = pages,
             faces = selection.faces,
             showTags = state.showFaceTags,
             onToggleTags = viewModel::toggleFaceTags,
@@ -215,10 +224,11 @@ fun PhotoFindScreen(
             onCancelPick = viewModel::cancelPick,
             onTagAs = viewModel::tagAs,
             onClose = { if (state.tagging != null) viewModel.stopTagging() else viewModel.back() },
-            onSimilar = { viewModel.findSimilar(selection.photo) },
-            onOpen = { onOpenPhoto(selection.photo.uri) },
-            onShare = { onSharePhoto(selection.photo.uri) },
-            onDelete = { viewModel.deletePhoto(selection.photo) },
+            onBrowse = viewModel::browseTo,
+            onSimilar = viewModel::findSimilar,
+            onOpen = onOpenPhoto,
+            onShare = onSharePhoto,
+            onDelete = viewModel::deletePhoto,
         )
     }
 

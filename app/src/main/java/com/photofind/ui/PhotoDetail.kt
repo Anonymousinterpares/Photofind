@@ -1,5 +1,6 @@
 package com.photofind.ui
 
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,9 +18,16 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import com.photofind.data.PhotoFace
 import kotlin.math.roundToInt
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,34 +47,48 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import com.photofind.search.IndexedPhoto
+import java.text.NumberFormat
+import kotlin.math.abs
 
 private const val MAX_ZOOM = 6f
 private const val DOUBLE_TAP_ZOOM = 2.5f
 
+/** One full-screen page, in the same order as the thumbnail grid. [score] is set for a search hit. */
+data class DetailPage(val photo: IndexedPhoto, val score: Float?)
+
 @Composable
 fun PhotoDetail(
     selection: Selection,
+    pages: List<DetailPage>,
     faces: List<PhotoFace>,
     showTags: Boolean,
     onToggleTags: () -> Unit,
@@ -78,12 +100,33 @@ fun PhotoDetail(
     onCancelPick: () -> Unit,
     onTagAs: (Person?, String?) -> Unit,
     onClose: () -> Unit,
-    onSimilar: () -> Unit,
-    onOpen: () -> Unit,
-    onShare: () -> Unit,
-    onDelete: () -> Unit,
+    onBrowse: (IndexedPhoto, Float?) -> Unit,
+    onSimilar: (IndexedPhoto) -> Unit,
+    onOpen: (Uri) -> Unit,
+    onShare: (Uri) -> Unit,
+    onDelete: (IndexedPhoto) -> Unit,
 ) {
-    val photo = selection.photo
+    // The open photo can briefly be missing from the grid (a reload); still show that one picture.
+    val safePages = if (pages.any { it.photo.key == selection.photo.key }) {
+        pages
+    } else {
+        listOf(DetailPage(selection.photo, selection.score))
+    }
+    val initialPage = safePages.indexOfFirst { it.photo.key == selection.photo.key }.coerceAtLeast(0)
+    val pagerState = rememberPagerState(initialPage = initialPage) { safePages.size }
+    val latestPages by rememberUpdatedState(safePages)
+    val browse by rememberUpdatedState(onBrowse)
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            latestPages.getOrNull(page)?.let { browse(it.photo, it.score) }
+        }
+    }
+    var zoomed by remember { mutableStateOf(false) }
+    val settledKey = safePages.getOrNull(pagerState.settledPage)?.photo?.key
+    // A newly settled photo starts zoomed out. Don't clear this when the same photo only shifts index.
+    LaunchedEffect(settledKey) { zoomed = false }
+    val numbers = remember { NumberFormat.getIntegerInstance() }
+
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
@@ -104,6 +147,8 @@ fun PhotoDetail(
                         tagging?.saving == true -> "Saving…"
                         tagging?.message != null -> tagging.message
                         tagging != null -> "Drag over a face to tag it, or tap a frame to change who it is"
+                        zoomed -> "Pinch or double-tap to zoom out"
+                        safePages.size > 1 -> "Swipe for the next photo · pinch or double-tap to zoom"
                         else -> "Pinch or double-tap to zoom"
                     },
                     color = Color.White.copy(alpha = if (tagging != null) 0.9f else 0.5f),
@@ -127,57 +172,91 @@ fun PhotoDetail(
                         )
                     }
                 }
-                IconButton(onClick = onDelete) {
+                IconButton(onClick = {
+                    safePages.getOrNull(pagerState.settledPage)?.let { onDelete(it.photo) }
+                }) {
                     Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.White)
                 }
             }
-            ZoomableImage(
-                photo = photo,
+            HorizontalPager(
+                state = pagerState,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
-                gestures = tagging == null,
-                overlay = when {
-                    tagging != null -> {
-                        { TagLayer(faces, tagging.box, onTagBox, onTagFace) }
-                    }
-                    showTags -> {
-                        { FaceTags(faces, onPerson) }
-                    }
-                    else -> null
-                },
-            )
-            Column(
-                Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(formatDateTime(photo.dateTaken), color = Color.White, style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "${photo.folder} · ${photo.fileName}",
-                    color = Color.White.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                if (faces.isNotEmpty()) {
-                    Text(
-                        peopleLine(faces),
-                        color = Color.White.copy(alpha = 0.85f),
-                        style = MaterialTheme.typography.bodySmall,
+                beyondViewportPageCount = 1,
+                pageSpacing = 16.dp,
+                userScrollEnabled = tagging == null && !zoomed,
+                key = { index -> safePages.getOrNull(index)?.photo?.key ?: "missing-$index" },
+            ) { page ->
+                val item = safePages.getOrNull(page) ?: return@HorizontalPager
+                val current = page == pagerState.settledPage && item.photo.key == selection.photo.key
+                Column(Modifier.fillMaxSize()) {
+                    ZoomableImage(
+                        photo = item.photo,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        gestures = tagging == null,
+                        onZoomedChange = { zoomedNow ->
+                            if (page == pagerState.settledPage) zoomed = zoomedNow
+                        },
+                        overlay = when {
+                            !current -> null
+                            tagging != null -> {
+                                { TagLayer(faces, tagging.box, onTagBox, onTagFace) }
+                            }
+                            showTags -> {
+                                { FaceTags(faces, onPerson) }
+                            }
+                            else -> null
+                        },
                     )
-                }
-                selection.score?.let {
-                    Text(
-                        "Match %.3f".format(it),
-                        color = Color.White.copy(alpha = 0.7f),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Row(
-                    Modifier.padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    FilledTonalButton(onClick = onSimilar) { Text("Similar") }
-                    OutlinedButton(onClick = onOpen) { Text("Open") }
-                    OutlinedButton(onClick = onShare) { Text("Share") }
+                    Column(
+                        Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        if (safePages.size > 1) {
+                            Text(
+                                "${numbers.format(page + 1)} / ${numbers.format(safePages.size)}",
+                                color = Color.White.copy(alpha = 0.6f),
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        }
+                        Text(
+                            formatDateTime(item.photo.dateTaken),
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            "${item.photo.folder} · ${item.photo.fileName}",
+                            color = Color.White.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        // Names arrive a moment after the photo. The line is always here, so the
+                        // picture does not shift up when they appear, or down when a photo has none.
+                        Text(
+                            if (current && faces.isNotEmpty()) peopleLine(faces) else " ",
+                            color = Color.White.copy(alpha = if (current && faces.isNotEmpty()) 0.85f else 0f),
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        item.score?.let {
+                            Text(
+                                "Match %.3f".format(it),
+                                color = Color.White.copy(alpha = 0.7f),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Row(
+                            Modifier.padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            FilledTonalButton(onClick = { onSimilar(item.photo) }) { Text("Similar") }
+                            OutlinedButton(onClick = { onOpen(item.photo.uri) }) { Text("Open") }
+                            OutlinedButton(onClick = { onShare(item.photo.uri) }) { Text("Share") }
+                        }
+                    }
                 }
             }
         }
@@ -352,11 +431,13 @@ private fun FaceTags(faces: List<PhotoFace>, onPerson: (Long?) -> Unit) {
 /** [overlay] is drawn over the photo's own area and zooms with it. */
 @Composable
 internal fun ZoomableImage(
-    photo: com.photofind.search.IndexedPhoto,
+    photo: IndexedPhoto,
     modifier: Modifier,
     overlay: (@Composable () -> Unit)? = null,
     /** Pinch and double-tap zoom; off while the overlay takes the gestures (tagging). */
     gestures: Boolean = true,
+    /** True once the photo is enlarged, so a parent pager can leave one-finger drags to panning. */
+    onZoomedChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     var scale by remember(photo.key) { mutableFloatStateOf(1f) }
@@ -370,6 +451,13 @@ internal fun ZoomableImage(
         return Offset(candidate.x.coerceIn(-maxX, maxX), candidate.y.coerceIn(-maxY, maxY))
     }
 
+    fun changeScale(newScale: Float, newOffset: Offset) {
+        val wasZoomed = scale > 1f
+        scale = newScale
+        offset = newOffset
+        if (wasZoomed != (newScale > 1f)) onZoomedChange(newScale > 1f)
+    }
+
     Box(
         modifier
             .clipToBounds()
@@ -379,26 +467,23 @@ internal fun ZoomableImage(
                 detectTapGestures(
                     onDoubleTap = { tap ->
                         if (scale > 1f) {
-                            scale = 1f
-                            offset = Offset.Zero
+                            changeScale(1f, Offset.Zero)
                         } else {
                             val center = Offset(size.width / 2f, size.height / 2f)
-                            scale = DOUBLE_TAP_ZOOM
-                            offset = clamp((center - tap) * (DOUBLE_TAP_ZOOM - 1f), DOUBLE_TAP_ZOOM)
+                            changeScale(DOUBLE_TAP_ZOOM, clamp((center - tap) * (DOUBLE_TAP_ZOOM - 1f), DOUBLE_TAP_ZOOM))
                         }
                     },
                 )
             }
             .pointerInput(photo.key, gestures) {
                 if (!gestures) return@pointerInput
-                detectTransformGestures { centroid, pan, zoom, _ ->
+                detectZoomPan(zoomed = { scale > 1f }) { centroid, pan, zoom ->
                     val newScale = (scale * zoom).coerceIn(1f, MAX_ZOOM)
                     // Keep the point under the fingers in place while zooming.
                     val center = Offset(size.width / 2f, size.height / 2f)
                     val focus = centroid - center
-                    val zoomed = (offset - focus) * (newScale / scale) + focus + pan
-                    scale = newScale
-                    offset = if (newScale == 1f) Offset.Zero else clamp(zoomed, newScale)
+                    val zoomedOffset = (offset - focus) * (newScale / scale) + focus + pan
+                    changeScale(newScale, if (newScale == 1f) Offset.Zero else clamp(zoomedOffset, newScale))
                 }
             },
     ) {
@@ -430,6 +515,54 @@ internal fun ZoomableImage(
                         .size(with(density) { shown.width.toDp() }, with(density) { shown.height.toDp() }),
                 ) { overlay() }
             }
+        }
+    }
+}
+
+/**
+ * Pinch to zoom, and pan once the photo is enlarged. A one-finger drag while zoomed out is not
+ * consumed, so the parent pager can turn the page. If the pager takes that drag, this gesture ends.
+ */
+private suspend fun PointerInputScope.detectZoomPan(
+    zoomed: () -> Boolean,
+    onGesture: (centroid: Offset, pan: Offset, zoom: Float) -> Unit,
+) {
+    awaitEachGesture {
+        var zoomTotal = 1f
+        var panTotal = Offset.Zero
+        var pastTouchSlop = false
+        val touchSlop = viewConfiguration.touchSlop
+        awaitFirstDown(requireUnconsumed = false)
+        while (true) {
+            val event = awaitPointerEvent()
+            val canceled = event.changes.any { it.isConsumed }
+            if (!canceled) {
+                val zoomChange = event.calculateZoom()
+                val panChange = event.calculatePan()
+                val pointers = event.changes.count { it.pressed }
+                if (!pastTouchSlop) {
+                    zoomTotal *= zoomChange
+                    panTotal += panChange
+                    val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                    val zoomMotion = abs(1f - zoomTotal) * centroidSize
+                    // Two fingers means a pinch: take it before the pager treats the movement as a swipe.
+                    if (pointers >= 2 || zoomMotion > touchSlop || (panTotal.getDistance() > touchSlop && zoomed())) {
+                        pastTouchSlop = true
+                    }
+                }
+                if (pastTouchSlop) {
+                    val centroid = event.calculateCentroid(useCurrent = false)
+                    if (zoomChange != 1f || panChange != Offset.Zero) {
+                        onGesture(centroid, panChange, zoomChange)
+                    }
+                    event.changes.forEach { change ->
+                        if (change.positionChanged()) change.consume()
+                    }
+                }
+            }
+            val parentTookTheDrag =
+                awaitPointerEvent(PointerEventPass.Final).changes.any { it.isConsumed } && !pastTouchSlop
+            if (canceled || parentTookTheDrag || event.changes.none { it.pressed }) break
         }
     }
 }

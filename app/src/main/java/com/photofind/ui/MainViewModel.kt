@@ -208,6 +208,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadFaces()
     }
 
+    /**
+     * Moves to another photo already on screen. Unlike [open], this does not add a back step,
+     * so Back still returns to the grid after swiping through several photos.
+     */
+    fun browseTo(photo: IndexedPhoto, score: Float?) {
+        val current = _state.value.selection ?: return
+        if (current.photo.key == photo.key) return
+        // Drop the previous photo's face boxes immediately; they would be drawn on the wrong picture.
+        _state.update { it.copy(selection = Selection(photo, score), tagging = null) }
+        loadFaces()
+    }
+
     // Tagging people by hand
 
     fun startTagging() {
